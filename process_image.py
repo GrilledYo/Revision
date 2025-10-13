@@ -15,7 +15,7 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import List, Sequence, Tuple
+from typing import Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -28,70 +28,58 @@ import numpy as np
 if not hasattr(np, "bool"):
     np.bool = np.bool_  # type: ignore[attr-defined]
 
-def _load_numerictypes_modules() -> List[ModuleType]:
-    """Load numerictypes modules while avoiding deprecated imports."""
+def _ensure_numerictypes_compatibility() -> None:
+    """Restore removed NumPy aliases without surfacing deprecation warnings."""
 
-    modules: List[ModuleType] = []
+    modules: list[ModuleType] = []
 
-    # Prefer the private ``numpy._core`` module, which is where ``numerictypes``
-    # officially lives as of NumPy 2.0+. Importing the legacy
-    # ``numpy.core.numerictypes`` alias surfaces a ``DeprecationWarning`` on
-    # every interpreter start, so favour the modern location and only fall back
-    # when the newer module is unavailable (e.g. with NumPy 1.x).
-    primary_module: ModuleType | None = None
-    try:  # pragma: no cover - exercised only with optional modules.
-        primary_module = importlib.import_module("numpy._core.numerictypes")
+    # NumPy 2.0 relocated ``numerictypes`` into the private ``_core`` package
+    # while leaving a deprecated shim at ``numpy.core.numerictypes``. Import the
+    # modern location first so we can reuse the implementation where available.
+    try:  # pragma: no cover - exercised only when NumPy exposes the new module.
+        modern = importlib.import_module("numpy._core.numerictypes")
     except Exception:
-        primary_module = None
+        modern = None
+    else:
+        if isinstance(modern, ModuleType):
+            modules.append(modern)
+            # Ensure the legacy import path resolves to the same module object to
+            # avoid duplicate imports (and the associated DeprecationWarning).
+            sys.modules.setdefault("numpy.core.numerictypes", modern)
 
-    if isinstance(primary_module, ModuleType):
-        modules.append(primary_module)
+    # Some environments still ship NumPy 1.x where the public module lives at
+    # ``numpy.core.numerictypes``. Import it while silencing the deprecation
+    # warning to keep the console clean on Python 3.12+, where these warnings
+    # are otherwise treated as errors in some configurations.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            category=DeprecationWarning,
+            message="numpy.core.numerictypes is deprecated",
+        )
+        try:  # pragma: no cover - depends on the NumPy version in use.
+            legacy = importlib.import_module("numpy.core.numerictypes")
+        except Exception:
+            legacy = None
+        else:
+            if isinstance(legacy, ModuleType) and legacy not in modules:
+                modules.append(legacy)
 
-        # Ensure that the deprecated import path resolves to the same module
-        # object. Pre-populating ``sys.modules`` prevents downstream imports
-        # from re-loading the module (which would re-trigger the deprecation
-        # warning) while still supporting third-party code that relies on the
-        # historical location.
-        legacy_name = "numpy.core.numerictypes"
-        legacy_module = sys.modules.get(legacy_name)
-        if legacy_module is None:
-            sys.modules[legacy_name] = primary_module
-        elif isinstance(legacy_module, ModuleType) and legacy_module not in modules:
-            modules.append(legacy_module)
-
-    if not modules:
-        legacy_module = sys.modules.get("numpy.core.numerictypes")
-        if not isinstance(legacy_module, ModuleType):
-            try:  # pragma: no cover - optional dependency path.
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", category=DeprecationWarning)
-                    legacy_module = importlib.import_module("numpy.core.numerictypes")
-            except Exception:
-                legacy_module = None
-        if isinstance(legacy_module, ModuleType):
-            modules.append(legacy_module)
-
-    return modules
-
-
-_NUMERICTYPES_MODULES = _load_numerictypes_modules()
-
-
-def _ensure_issubclass_alias() -> None:
     def _issubclass(candidate: object, classinfo: object) -> bool:
         try:
             return issubclass(candidate, classinfo)  # type: ignore[arg-type]
         except TypeError:
             return False
 
-    for module in _NUMERICTYPES_MODULES:
+    for module in modules:
         if not hasattr(module, "issubclass_"):
             setattr(module, "issubclass_", _issubclass)
+
     if not hasattr(np, "issubclass_"):
         np.issubclass_ = _issubclass  # type: ignore[attr-defined]
 
 
-_ensure_issubclass_alias()
+_ensure_numerictypes_compatibility()
 import pytesseract
 
 
@@ -129,7 +117,7 @@ def load_image(path: Path) -> np.ndarray:
     return image
 
 
-def detect_red_markers(image: np.ndarray, min_area: float = 30.0) -> List[MarkerDetection]:
+def detect_red_markers(image: np.ndarray, min_area: float = 30.0) -> list[MarkerDetection]:
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
     def make_bound(values: Sequence[int]) -> np.ndarray:
@@ -158,7 +146,7 @@ def detect_red_markers(image: np.ndarray, min_area: float = 30.0) -> List[Marker
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    detections: List[MarkerDetection] = []
+    detections: list[MarkerDetection] = []
     for contour in contours:
         area = cv2.contourArea(contour)
         if area < min_area:
@@ -216,7 +204,7 @@ def prepare_digits_region(image: np.ndarray, width_ratio: float = 0.35, height_r
     return image[y_start:, x_start:], (x_start, y_start)
 
 
-def run_ocr_on_region(region: np.ndarray) -> List[OcrDetection]:
+def run_ocr_on_region(region: np.ndarray) -> list[OcrDetection]:
     gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -225,7 +213,7 @@ def run_ocr_on_region(region: np.ndarray) -> List[OcrDetection]:
     config = "--psm 6 -c tessedit_char_whitelist=0123456789."
     data = pytesseract.image_to_data(thresh, config=config, output_type=pytesseract.Output.DICT)
 
-    detections: List[OcrDetection] = []
+    detections: list[OcrDetection] = []
     for text, conf, x, y, w, h in zip(data["text"], data["conf"], data["left"], data["top"], data["width"], data["height"]):
         if not text.strip():
             continue
