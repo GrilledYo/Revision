@@ -54,10 +54,22 @@ def load_image(path: Path) -> np.ndarray:
 
 def detect_red_markers(image: np.ndarray, min_area: float = 30.0) -> List[MarkerDetection]:
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    lower_red1 = np.array([0, 100, 80], dtype=np.uint8)
-    upper_red1 = np.array([10, 255, 255], dtype=np.uint8)
-    lower_red2 = np.array([160, 100, 80], dtype=np.uint8)
-    upper_red2 = np.array([179, 255, 255], dtype=np.uint8)
+
+    def make_bound(values: Sequence[int]) -> np.ndarray:
+        """Create a contiguous HSV bound matching the source image dtype."""
+
+        bound = np.asarray(values, dtype=hsv.dtype)
+        # OpenCV expects the thresholds to be treated as scalars, but newer
+        # versions are stricter about the underlying array type. Ensuring a
+        # contiguous `ndarray` avoids the "lowerb is not a numpy array" error
+        # triggered when the bounds come through as Python sequences under
+        # certain NumPy/OpenCV combinations.
+        return np.ascontiguousarray(bound.reshape(1, 1, -1))
+
+    lower_red1 = make_bound((0, 100, 80))
+    upper_red1 = make_bound((10, 255, 255))
+    lower_red2 = make_bound((160, 100, 80))
+    upper_red2 = make_bound((179, 255, 255))
 
     mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
     mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
