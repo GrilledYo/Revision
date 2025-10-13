@@ -15,6 +15,14 @@ from typing import List, Sequence, Tuple
 
 import cv2
 import numpy as np
+
+# NumPy removed the deprecated ``np.bool`` alias in version 1.24. Some of the
+# libraries used by this script (notably certain OpenCV builds) still reference
+# the alias internally, which raises an ``AttributeError`` at runtime. To retain
+# compatibility across NumPy versions, recreate the alias when it is missing by
+# pointing it at the canonical ``np.bool_`` scalar type.
+if not hasattr(np, "bool"):
+    np.bool = np.bool_  # type: ignore[attr-defined]
 import pytesseract
 
 
