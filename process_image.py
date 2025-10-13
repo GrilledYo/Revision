@@ -23,6 +23,36 @@ import numpy as np
 # pointing it at the canonical ``np.bool_`` scalar type.
 if not hasattr(np, "bool"):
     np.bool = np.bool_  # type: ignore[attr-defined]
+
+# NumPy 2.0 removed a handful of aliases that some third-party packages still
+# reference. One of those aliases is ``numpy.core.numerictypes.issubclass_``,
+# which was previously a thin wrapper around Python's built-in ``issubclass``.
+# Certain OpenCV builds import the helper directly and expect it to be present.
+# Provide a lightweight fallback implementation when NumPy no longer exports
+# the symbol so that those imports continue to succeed.
+try:  # pragma: no cover - exercised only on NumPy builds missing the alias.
+    from numpy.core import numerictypes as _numerictypes
+except Exception:  # NumPy 2.0 moved ``core`` under ``_core``.
+    try:
+        from numpy._core import numerictypes as _numerictypes  # type: ignore[attr-defined]
+    except Exception:  # pragma: no cover - defensive guard.
+        _numerictypes = None  # type: ignore[assignment]
+
+
+def _ensure_issubclass_alias() -> None:
+    def _issubclass(candidate: object, classinfo: object) -> bool:
+        try:
+            return issubclass(candidate, classinfo)  # type: ignore[arg-type]
+        except TypeError:
+            return False
+
+    if _numerictypes is not None and not hasattr(_numerictypes, "issubclass_"):
+        _numerictypes.issubclass_ = _issubclass  # type: ignore[attr-defined]
+    if not hasattr(np, "issubclass_"):
+        np.issubclass_ = _issubclass  # type: ignore[attr-defined]
+
+
+_ensure_issubclass_alias()
 import pytesseract
 
 
