@@ -29,19 +29,48 @@ if not hasattr(np, "bool"):
     np.bool = np.bool_  # type: ignore[attr-defined]
 
 def _load_numerictypes_modules() -> List[ModuleType]:
-    """Load numerictypes modules without surfacing deprecation warnings."""
+    """Load numerictypes modules while avoiding deprecated imports."""
 
     modules: List[ModuleType] = []
-    for name in ("numpy._core.numerictypes", "numpy.core.numerictypes"):
-        module = sys.modules.get(name)
-        if module is None:
-            try:  # pragma: no cover - exercised only with optional modules.
+
+    # Prefer the private ``numpy._core`` module, which is where ``numerictypes``
+    # officially lives as of NumPy 2.0+. Importing the legacy
+    # ``numpy.core.numerictypes`` alias surfaces a ``DeprecationWarning`` on
+    # every interpreter start, so favour the modern location and only fall back
+    # when the newer module is unavailable (e.g. with NumPy 1.x).
+    primary_module: ModuleType | None = None
+    try:  # pragma: no cover - exercised only with optional modules.
+        primary_module = importlib.import_module("numpy._core.numerictypes")
+    except Exception:
+        primary_module = None
+
+    if isinstance(primary_module, ModuleType):
+        modules.append(primary_module)
+
+        # Ensure that the deprecated import path resolves to the same module
+        # object. Pre-populating ``sys.modules`` prevents downstream imports
+        # from re-loading the module (which would re-trigger the deprecation
+        # warning) while still supporting third-party code that relies on the
+        # historical location.
+        legacy_name = "numpy.core.numerictypes"
+        legacy_module = sys.modules.get(legacy_name)
+        if legacy_module is None:
+            sys.modules[legacy_name] = primary_module
+        elif isinstance(legacy_module, ModuleType) and legacy_module not in modules:
+            modules.append(legacy_module)
+
+    if not modules:
+        legacy_module = sys.modules.get("numpy.core.numerictypes")
+        if not isinstance(legacy_module, ModuleType):
+            try:  # pragma: no cover - optional dependency path.
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", category=DeprecationWarning)
-                    module = importlib.import_module(name)
+                    legacy_module = importlib.import_module("numpy.core.numerictypes")
             except Exception:
-                continue
-        modules.append(module)
+                legacy_module = None
+        if isinstance(legacy_module, ModuleType):
+            modules.append(legacy_module)
+
     return modules
 
 
