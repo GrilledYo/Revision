@@ -89,18 +89,44 @@ def detect_red_markers(image: np.ndarray, min_area: float = 30.0) -> List[Marker
     return detections[:2]
 
 
-def crop_between_markers(image: np.ndarray, markers: Sequence[MarkerDetection], padding: int = 10) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
-    xs = [m.center[0] for m in markers]
-    ys = [m.center[1] for m in markers]
-    x_min = max(min(xs) - padding, 0)
-    y_min = max(min(ys) - padding, 0)
-    x_max = min(max(xs) + padding, image.shape[1])
-    y_max = min(max(ys) + padding, image.shape[0])
+def enhance_contrast(image: np.ndarray) -> np.ndarray:
+    """Improve local contrast while keeping colors realistic."""
 
-    cropped = image[y_min:y_max, x_min:x_max]
+    if image.size == 0:
+        return image
+
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    l_enhanced = clahe.apply(l_channel)
+    lab_enhanced = cv2.merge((l_enhanced, a_channel, b_channel))
+    return cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
+
+
+def crop_between_markers(image: np.ndarray, markers: Sequence[MarkerDetection], padding: int = 10) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    for marker in markers:
+        cv2.drawContours(mask, [marker.contour], contourIdx=-1, color=255, thickness=-1)
+
+    nonzero = cv2.findNonZero(mask)
+    if nonzero is None:
+        raise RuntimeError("Could not determine region enclosed by red markers.")
+
+    x, y, w, h = cv2.boundingRect(nonzero)
+    x_min = max(x - padding, 0)
+    y_min = max(y - padding, 0)
+    x_max = min(x + w + padding, image.shape[1])
+    y_max = min(y + h + padding, image.shape[0])
+
+    cropped = image[y_min:y_max, x_min:x_max].copy()
     if cropped.size == 0:
         raise RuntimeError("Crop produced an empty image. Check marker positions.")
-    return cropped, (x_min, y_min, x_max, y_max)
+
+    cropped_mask = mask[y_min:y_max, x_min:x_max]
+    masked_cropped = cv2.bitwise_and(cropped, cropped, mask=cropped_mask)
+    enhanced = enhance_contrast(masked_cropped)
+    final_crop = cv2.bitwise_and(enhanced, enhanced, mask=cropped_mask)
+    return final_crop, (x_min, y_min, x_max, y_max)
 
 
 def compute_dye_area(image: np.ndarray) -> DyeAreaResult:
@@ -127,29 +153,65 @@ def prepare_digits_region(image: np.ndarray, width_ratio: float = 0.35, height_r
     return image[y_start:, x_start:], (x_start, y_start)
 
 
-def run_ocr_on_region(region: np.ndarray) -> List[OcrDetection]:
+def preprocess_digits_region(region: np.ndarray, scale_factor: float = 2.0) -> Tuple[np.ndarray, float, float]:
     gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY_INV, 35, 11)
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
 
-    config = "--psm 6 -c tessedit_char_whitelist=0123456789."
-    data = pytesseract.image_to_data(thresh, config=config, output_type=pytesseract.Output.DICT)
+    scaled = cv2.resize(
+        enhanced,
+        dsize=None,
+        fx=scale_factor,
+        fy=scale_factor,
+        interpolation=cv2.INTER_CUBIC,
+    )
+
+    _, thresh = cv2.threshold(scaled, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
+    cleaned = cv2.medianBlur(cleaned, 3)
+
+    scale_x = cleaned.shape[1] / max(region.shape[1], 1)
+    scale_y = cleaned.shape[0] / max(region.shape[0], 1)
+    return cleaned, scale_x, scale_y
+
+
+def run_ocr_on_region(region: np.ndarray) -> Tuple[List[OcrDetection], np.ndarray]:
+    processed, scale_x, scale_y = preprocess_digits_region(region)
+
+    config = "--psm 7 --oem 3 -c tessedit_char_whitelist=0123456789."
+    data = pytesseract.image_to_data(processed, config=config, output_type=pytesseract.Output.DICT)
 
     detections: List[OcrDetection] = []
-    for text, conf, x, y, w, h in zip(data["text"], data["conf"], data["left"], data["top"], data["width"], data["height"]):
+    for text, conf, x, y, w, h in zip(
+        data["text"],
+        data["conf"],
+        data["left"],
+        data["top"],
+        data["width"],
+        data["height"],
+    ):
         if not text.strip():
             continue
         try:
             conf_value = float(conf)
         except ValueError:
             conf_value = -1.0
+        if conf_value < 0:
+            continue
         cleaned_text = text.strip()
         if any(ch not in "0123456789." for ch in cleaned_text):
             continue
-        detections.append(OcrDetection(text=cleaned_text, confidence=conf_value, bbox=(x, y, w, h)))
 
-    return detections
+        x_orig = int(round(x / scale_x))
+        y_orig = int(round(y / scale_y))
+        w_orig = int(round(w / scale_x))
+        h_orig = int(round(h / scale_y))
+        detections.append(
+            OcrDetection(text=cleaned_text, confidence=conf_value, bbox=(x_orig, y_orig, w_orig, h_orig))
+        )
+
+    return detections, processed
 
 
 def save_digits_to_csv(detections: Sequence[OcrDetection], csv_path: Path, origin: Tuple[int, int]) -> None:
@@ -217,7 +279,9 @@ def main() -> None:
     digits_region_path = output_dir / "digits_region.png"
     cv2.imwrite(str(digits_region_path), digits_region)
 
-    digit_detections = run_ocr_on_region(digits_region)
+    digit_detections, processed_digits = run_ocr_on_region(digits_region)
+    processed_digits_path = output_dir / "digits_region_processed.png"
+    cv2.imwrite(str(processed_digits_path), processed_digits)
     csv_path = output_dir / "numeric_readings.csv"
     save_digits_to_csv(digit_detections, csv_path, origin)
 
@@ -247,6 +311,7 @@ def main() -> None:
     print(f"Dye mask saved to: {dye_mask_path}")
     print(f"Dye overlay saved to: {overlay_path}")
     print(f"Digits region saved to: {digits_region_path}")
+    print(f"Processed digits preview saved to: {processed_digits_path}")
     print(f"Numeric readings CSV saved to: {csv_path}")
     print(f"Summary saved to: {summary_path}")
 
