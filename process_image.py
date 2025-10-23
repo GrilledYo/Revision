@@ -36,7 +36,7 @@ CLAHE_CLIP_LIMIT = 2.5  # Clip limit for CLAHE; higher values increase local con
 CLAHE_TILE_GRID_SIZE = (8, 8)  # Grid size for CLAHE; smaller grids adapt more locally to contrast changes.
 
 # Cropping
-DEFAULT_CROP_PADDING = 10  # Extra pixels included around detected markers when cropping the region of interest.
+DEFAULT_CROP_PADDING =-20  # Extra pixels included around detected markers when cropping the region of interest.
 
 # Dye area segmentation
 GAUSSIAN_BLUR_KERNEL = (5, 5)  # Kernel size for smoothing the saturation channel before thresholding.
@@ -45,15 +45,15 @@ DYE_MASK_OPEN_ITERATIONS = 1  # Number of opening steps to remove isolated pixel
 DYE_MASK_CLOSE_ITERATIONS = 2  # Number of closing steps to fill small gaps in the dye mask.
 
 # Digits region extraction
-DEFAULT_DIGITS_WIDTH_RATIO = 0.35  # Horizontal proportion of the image captured for the bottom-right digits crop.
-DEFAULT_DIGITS_HEIGHT_RATIO = 0.30  # Vertical proportion of the image captured for the bottom-right digits crop.
+DEFAULT_DIGITS_WIDTH_RATIO = 0.25  # Horizontal proportion of the image captured for the bottom-right digits crop.
+DEFAULT_DIGITS_HEIGHT_RATIO = 0.15  # Vertical proportion of the image captured for the bottom-right digits crop.
 
 # Digit preprocessing
-DIGIT_CLAHE_CLIP_LIMIT = 2.5  # CLAHE clip limit for digit preprocessing to sharpen contrast.
-DIGIT_CLAHE_TILE_GRID_SIZE = (8, 8)  # CLAHE tile grid size for digit preprocessing.
-DIGIT_SCALE_FACTOR = 2.0  # Upscaling factor applied before thresholding to improve OCR accuracy.
-DIGIT_THRESH_KERNEL_SIZE = (3, 3)  # Kernel size for morphological closing on the digit mask.
-DIGIT_MEDIAN_BLUR_SIZE = 3  # Median blur aperture size for removing salt-and-pepper noise after thresholding.
+DIGIT_CLAHE_CLIP_LIMIT = 1 # CLAHE clip limit for digit preprocessing to sharpen contrast.
+DIGIT_CLAHE_TILE_GRID_SIZE = (2, 2)  # CLAHE tile grid size for digit preprocessing.
+DIGIT_SCALE_FACTOR = 2  # Upscaling factor applied before thresholding to improve OCR accuracy.
+DIGIT_THRESH_KERNEL_SIZE = (1, 1)  # Kernel size for morphological closing on the digit mask.
+DIGIT_MEDIAN_BLUR_SIZE = 1  # Median blur aperture size for removing salt-and-pepper noise after thresholding.
 
 # OCR
 TESSERACT_CONFIG = "--psm 7 --oem 3 -c tessedit_char_whitelist=0123456789."  # OCR engine configuration string.
@@ -153,6 +153,7 @@ def enhance_contrast(image: np.ndarray) -> np.ndarray:
 
 def crop_between_markers(
     image: np.ndarray,
+    image2: np.darray,
     markers: Sequence[MarkerDetection],
     padding: int = DEFAULT_CROP_PADDING,
 ) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
@@ -174,10 +175,10 @@ def crop_between_markers(
     if cropped.size == 0:
         raise RuntimeError("Crop produced an empty image. Check marker positions.")
 
-    cropped_mask = mask[y_min:y_max, x_min:x_max]
-    masked_cropped = cv2.bitwise_and(cropped, cropped, mask=cropped_mask)
-    enhanced = enhance_contrast(masked_cropped)
-    final_crop = cv2.bitwise_and(enhanced, enhanced, mask=cropped_mask)
+    cropped_mask = image2[y_min:y_max, x_min:x_max]
+    #masked_cropped = cv2.bitwise_and(cropped, cropped, mask=cropped_mask)
+    #enhanced = enhance_contrast(masked_cropped)
+    final_crop = cropped_mask#cv2.bitwise_and(enhanced, enhanced, mask=cropped_mask)
     return final_crop, (x_min, y_min, x_max, y_max)
 
 
@@ -225,7 +226,7 @@ def preprocess_digits_region(
         interpolation=cv2.INTER_CUBIC,
     )
 
-    _, thresh = cv2.threshold(scaled, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    _, thresh = cv2.threshold(scaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, DIGIT_THRESH_KERNEL_SIZE)
     cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
     cleaned = cv2.medianBlur(cleaned, DIGIT_MEDIAN_BLUR_SIZE)
@@ -352,17 +353,17 @@ def main() -> None:
     output_dir = args.output
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    markers = detect_red_markers(image)
-    cropped, crop_bounds = crop_between_markers(image, markers, padding=args.padding)
-    cropped_path = output_dir / "cropped_region.png"
-    cv2.imwrite(str(cropped_path), cropped)
-
     dye_area = compute_dye_area(image)
     dye_mask_path = output_dir / "dye_mask.png"
     cv2.imwrite(str(dye_mask_path), dye_area.mask)
     overlay_path = output_dir / "dye_overlay.png"
     overlay = overlay_mask(image, dye_area.mask)
     cv2.imwrite(str(overlay_path), overlay)
+    
+    markers = detect_red_markers(image)
+    cropped, crop_bounds = crop_between_markers(image, dye_area.mask, markers, padding=args.padding)
+    cropped_path = output_dir / "cropped_region.png"
+    cv2.imwrite(str(cropped_path), cropped)
 
     annotated_markers = annotate_markers(image, markers)
     markers_path = output_dir / "marker_detection.png"

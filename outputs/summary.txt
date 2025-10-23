@@ -1,10 +1,10 @@
 Dye area analysis
-Total pixels: 159460
-Dye pixel count: 9957
-Dye area ratio: 0.0624
+Total pixels: 123849
+Dye pixel count: 6882
+Dye area ratio: 0.0556
 
 Crop bounds (x_min, y_min, x_max, y_max):
-36, 74, 244, 284
+54, 89, 198, 236
 
 Numeric detections:
 No numeric text detected.
