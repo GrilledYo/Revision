@@ -17,6 +17,56 @@ import cv2
 import numpy as np
 import pytesseract
 
+# ---------------------------------------------------------------------------
+# Tunable parameters
+# ---------------------------------------------------------------------------
+
+# Marker detection
+MARKER_MIN_AREA = 30.0  # Smallest contour area (in pixels) considered a valid red marker.
+RED_HSV_RANGE_1 = (np.array([0, 100, 80], dtype=np.uint8), np.array([10, 255, 255], dtype=np.uint8))
+# HSV lower/upper bounds capturing the lower portion of the red spectrum.
+RED_HSV_RANGE_2 = (np.array([160, 100, 80], dtype=np.uint8), np.array([179, 255, 255], dtype=np.uint8))
+# HSV lower/upper bounds capturing the upper portion of the red spectrum.
+MARKER_KERNEL_SIZE = (5, 5)  # Elliptical kernel size for cleaning the red marker mask.
+MARKER_OPEN_ITERATIONS = 2  # Number of opening operations to remove small noise in marker mask.
+MARKER_DILATE_ITERATIONS = 1  # Number of dilation steps to merge fragmented marker regions.
+
+# Contrast enhancement
+CLAHE_CLIP_LIMIT = 2.5  # Clip limit for CLAHE; higher values increase local contrast more strongly.
+CLAHE_TILE_GRID_SIZE = (8, 8)  # Grid size for CLAHE; smaller grids adapt more locally to contrast changes.
+
+# Cropping
+DEFAULT_CROP_PADDING = 10  # Extra pixels included around detected markers when cropping the region of interest.
+
+# Dye area segmentation
+GAUSSIAN_BLUR_KERNEL = (5, 5)  # Kernel size for smoothing the saturation channel before thresholding.
+DYE_MASK_KERNEL_SIZE = (5, 5)  # Elliptical kernel size for morphological cleanup of the dye mask.
+DYE_MASK_OPEN_ITERATIONS = 1  # Number of opening steps to remove isolated pixels in the dye mask.
+DYE_MASK_CLOSE_ITERATIONS = 2  # Number of closing steps to fill small gaps in the dye mask.
+
+# Digits region extraction
+DEFAULT_DIGITS_WIDTH_RATIO = 0.35  # Horizontal proportion of the image captured for the bottom-right digits crop.
+DEFAULT_DIGITS_HEIGHT_RATIO = 0.30  # Vertical proportion of the image captured for the bottom-right digits crop.
+
+# Digit preprocessing
+DIGIT_CLAHE_CLIP_LIMIT = 2.5  # CLAHE clip limit for digit preprocessing to sharpen contrast.
+DIGIT_CLAHE_TILE_GRID_SIZE = (8, 8)  # CLAHE tile grid size for digit preprocessing.
+DIGIT_SCALE_FACTOR = 2.0  # Upscaling factor applied before thresholding to improve OCR accuracy.
+DIGIT_THRESH_KERNEL_SIZE = (3, 3)  # Kernel size for morphological closing on the digit mask.
+DIGIT_MEDIAN_BLUR_SIZE = 3  # Median blur aperture size for removing salt-and-pepper noise after thresholding.
+
+# OCR
+TESSERACT_CONFIG = "--psm 7 --oem 3 -c tessedit_char_whitelist=0123456789."  # OCR engine configuration string.
+
+# Visualization
+OVERLAY_COLOR = (0, 0, 255)  # BGR color for overlaying the dye mask on the original image.
+OVERLAY_ALPHA = 0.4  # Opacity for the dye mask overlay; higher values increase mask prominence.
+MARKER_ANNOTATION_COLOR = (0, 255, 0)  # BGR color for drawing marker annotations on preview images.
+MARKER_CROSS_SIZE = 20  # Size of the cross marker drawn at detected marker centers.
+MARKER_CROSS_THICKNESS = 2  # Line thickness of the cross marker overlay.
+MARKER_CIRCLE_RADIUS = 10  # Radius of the circle drawn around each detected marker.
+MARKER_CIRCLE_THICKNESS = 2  # Line thickness of the marker circle overlay.
+
 
 @dataclass
 class MarkerDetection:
@@ -52,20 +102,18 @@ def load_image(path: Path) -> np.ndarray:
     return image
 
 
-def detect_red_markers(image: np.ndarray, min_area: float = 30.0) -> List[MarkerDetection]:
+def detect_red_markers(image: np.ndarray, min_area: float = MARKER_MIN_AREA) -> List[MarkerDetection]:
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    lower_red1 = np.array([0, 100, 80], dtype=np.uint8)
-    upper_red1 = np.array([10, 255, 255], dtype=np.uint8)
-    lower_red2 = np.array([160, 100, 80], dtype=np.uint8)
-    upper_red2 = np.array([179, 255, 255], dtype=np.uint8)
+    lower_red1, upper_red1 = RED_HSV_RANGE_1
+    lower_red2, upper_red2 = RED_HSV_RANGE_2
 
     mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
     mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
     mask = cv2.bitwise_or(mask1, mask2)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel, iterations=1)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, MARKER_KERNEL_SIZE)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=MARKER_OPEN_ITERATIONS)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel, iterations=MARKER_DILATE_ITERATIONS)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -97,13 +145,17 @@ def enhance_contrast(image: np.ndarray) -> np.ndarray:
 
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
     l_channel, a_channel, b_channel = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT, tileGridSize=CLAHE_TILE_GRID_SIZE)
     l_enhanced = clahe.apply(l_channel)
     lab_enhanced = cv2.merge((l_enhanced, a_channel, b_channel))
     return cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
 
 
-def crop_between_markers(image: np.ndarray, markers: Sequence[MarkerDetection], padding: int = 10) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+def crop_between_markers(
+    image: np.ndarray,
+    markers: Sequence[MarkerDetection],
+    padding: int = DEFAULT_CROP_PADDING,
+) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
     mask = np.zeros(image.shape[:2], dtype=np.uint8)
     for marker in markers:
         cv2.drawContours(mask, [marker.contour], contourIdx=-1, color=255, thickness=-1)
@@ -132,12 +184,12 @@ def crop_between_markers(image: np.ndarray, markers: Sequence[MarkerDetection], 
 def compute_dye_area(image: np.ndarray) -> DyeAreaResult:
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     saturation = hsv[:, :, 1]
-    blurred = cv2.GaussianBlur(saturation, (5, 5), 0)
+    blurred = cv2.GaussianBlur(saturation, GAUSSIAN_BLUR_KERNEL, 0)
     _, sat_mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    cleaned = cv2.morphologyEx(sat_mask, cv2.MORPH_OPEN, kernel, iterations=1)
-    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel, iterations=2)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, DYE_MASK_KERNEL_SIZE)
+    cleaned = cv2.morphologyEx(sat_mask, cv2.MORPH_OPEN, kernel, iterations=DYE_MASK_OPEN_ITERATIONS)
+    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel, iterations=DYE_MASK_CLOSE_ITERATIONS)
 
     pixel_area = int(cv2.countNonZero(cleaned))
     total_pixels = image.shape[0] * image.shape[1]
@@ -146,16 +198,23 @@ def compute_dye_area(image: np.ndarray) -> DyeAreaResult:
     return DyeAreaResult(mask=cleaned, pixel_area=pixel_area, area_ratio=area_ratio)
 
 
-def prepare_digits_region(image: np.ndarray, width_ratio: float = 0.35, height_ratio: float = 0.30) -> Tuple[np.ndarray, Tuple[int, int]]:
+def prepare_digits_region(
+    image: np.ndarray,
+    width_ratio: float = DEFAULT_DIGITS_WIDTH_RATIO,
+    height_ratio: float = DEFAULT_DIGITS_HEIGHT_RATIO,
+) -> Tuple[np.ndarray, Tuple[int, int]]:
     h, w = image.shape[:2]
     x_start = max(int(w * (1.0 - width_ratio)), 0)
     y_start = max(int(h * (1.0 - height_ratio)), 0)
     return image[y_start:, x_start:], (x_start, y_start)
 
 
-def preprocess_digits_region(region: np.ndarray, scale_factor: float = 2.0) -> Tuple[np.ndarray, float, float]:
+def preprocess_digits_region(
+    region: np.ndarray,
+    scale_factor: float = DIGIT_SCALE_FACTOR,
+) -> Tuple[np.ndarray, float, float]:
     gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    clahe = cv2.createCLAHE(clipLimit=DIGIT_CLAHE_CLIP_LIMIT, tileGridSize=DIGIT_CLAHE_TILE_GRID_SIZE)
     enhanced = clahe.apply(gray)
 
     scaled = cv2.resize(
@@ -167,9 +226,9 @@ def preprocess_digits_region(region: np.ndarray, scale_factor: float = 2.0) -> T
     )
 
     _, thresh = cv2.threshold(scaled, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, DIGIT_THRESH_KERNEL_SIZE)
     cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
-    cleaned = cv2.medianBlur(cleaned, 3)
+    cleaned = cv2.medianBlur(cleaned, DIGIT_MEDIAN_BLUR_SIZE)
 
     scale_x = cleaned.shape[1] / max(region.shape[1], 1)
     scale_y = cleaned.shape[0] / max(region.shape[0], 1)
@@ -179,8 +238,7 @@ def preprocess_digits_region(region: np.ndarray, scale_factor: float = 2.0) -> T
 def run_ocr_on_region(region: np.ndarray) -> Tuple[List[OcrDetection], np.ndarray]:
     processed, scale_x, scale_y = preprocess_digits_region(region)
 
-    config = "--psm 7 --oem 3 -c tessedit_char_whitelist=0123456789."
-    data = pytesseract.image_to_data(processed, config=config, output_type=pytesseract.Output.DICT)
+    data = pytesseract.image_to_data(processed, config=TESSERACT_CONFIG, output_type=pytesseract.Output.DICT)
 
     detections: List[OcrDetection] = []
     for text, conf, x, y, w, h in zip(
@@ -225,7 +283,12 @@ def save_digits_to_csv(detections: Sequence[OcrDetection], csv_path: Path, origi
             writer.writerow([det.text, f"{det.confidence:.2f}", x + x_origin, y + y_origin, w, h])
 
 
-def overlay_mask(image: np.ndarray, mask: np.ndarray, color: Tuple[int, int, int] = (0, 0, 255), alpha: float = 0.4) -> np.ndarray:
+def overlay_mask(
+    image: np.ndarray,
+    mask: np.ndarray,
+    color: Tuple[int, int, int] = OVERLAY_COLOR,
+    alpha: float = OVERLAY_ALPHA,
+) -> np.ndarray:
     colored_mask = np.zeros_like(image)
     colored_mask[:, :] = color
     mask_bool = mask.astype(bool)
@@ -237,8 +300,21 @@ def overlay_mask(image: np.ndarray, mask: np.ndarray, color: Tuple[int, int, int
 def annotate_markers(image: np.ndarray, markers: Sequence[MarkerDetection]) -> np.ndarray:
     annotated = image.copy()
     for marker in markers:
-        cv2.drawMarker(annotated, marker.center, color=(0, 255, 0), markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
-        cv2.circle(annotated, marker.center, radius=10, color=(0, 255, 0), thickness=2)
+        cv2.drawMarker(
+            annotated,
+            marker.center,
+            color=MARKER_ANNOTATION_COLOR,
+            markerType=cv2.MARKER_CROSS,
+            markerSize=MARKER_CROSS_SIZE,
+            thickness=MARKER_CROSS_THICKNESS,
+        )
+        cv2.circle(
+            annotated,
+            marker.center,
+            radius=MARKER_CIRCLE_RADIUS,
+            color=MARKER_ANNOTATION_COLOR,
+            thickness=MARKER_CIRCLE_THICKNESS,
+        )
     return annotated
 
 
@@ -246,9 +322,26 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze dye flow image with OpenCV.")
     parser.add_argument("image", type=Path, nargs="?", default=Path("screenshot.png"), help="Path to the input image.")
     parser.add_argument("--output", type=Path, default=Path("outputs"), help="Directory where outputs will be saved.")
-    parser.add_argument("--padding", type=int, default=10, help="Padding in pixels applied around detected markers when cropping.")
-    parser.add_argument("--digits-width", type=float, default=0.35, dest="digits_width", help="Width ratio for bottom-right digits region crop.")
-    parser.add_argument("--digits-height", type=float, default=0.30, dest="digits_height", help="Height ratio for bottom-right digits region crop.")
+    parser.add_argument(
+        "--padding",
+        type=int,
+        default=DEFAULT_CROP_PADDING,
+        help="Padding in pixels applied around detected markers when cropping.",
+    )
+    parser.add_argument(
+        "--digits-width",
+        type=float,
+        default=DEFAULT_DIGITS_WIDTH_RATIO,
+        dest="digits_width",
+        help="Width ratio for bottom-right digits region crop.",
+    )
+    parser.add_argument(
+        "--digits-height",
+        type=float,
+        default=DEFAULT_DIGITS_HEIGHT_RATIO,
+        dest="digits_height",
+        help="Height ratio for bottom-right digits region crop.",
+    )
     return parser.parse_args()
 
 
