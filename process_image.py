@@ -9,77 +9,12 @@ from __future__ import annotations
 
 import argparse
 import csv
-import importlib
-import sys
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
-from typing import Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 import cv2
 import numpy as np
-
-# NumPy removed the deprecated ``np.bool`` alias in version 1.24. Some of the
-# libraries used by this script (notably certain OpenCV builds) still reference
-# the alias internally, which raises an ``AttributeError`` at runtime. To retain
-# compatibility across NumPy versions, recreate the alias when it is missing by
-# pointing it at the canonical ``np.bool_`` scalar type.
-if not hasattr(np, "bool"):
-    np.bool = np.bool_  # type: ignore[attr-defined]
-
-def _ensure_numerictypes_compatibility() -> None:
-    """Restore removed NumPy aliases without surfacing deprecation warnings."""
-
-    modules: list[ModuleType] = []
-
-    # NumPy 2.0 relocated ``numerictypes`` into the private ``_core`` package
-    # while leaving a deprecated shim at ``numpy.core.numerictypes``. Import the
-    # modern location first so we can reuse the implementation where available.
-    try:  # pragma: no cover - exercised only when NumPy exposes the new module.
-        modern = importlib.import_module("numpy._core.numerictypes")
-    except Exception:
-        modern = None
-    else:
-        if isinstance(modern, ModuleType):
-            modules.append(modern)
-            # Ensure the legacy import path resolves to the same module object to
-            # avoid duplicate imports (and the associated DeprecationWarning).
-            sys.modules.setdefault("numpy.core.numerictypes", modern)
-
-    # Some environments still ship NumPy 1.x where the public module lives at
-    # ``numpy.core.numerictypes``. Import it while silencing the deprecation
-    # warning to keep the console clean on Python 3.12+, where these warnings
-    # are otherwise treated as errors in some configurations.
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            category=DeprecationWarning,
-            message="numpy.core.numerictypes is deprecated",
-        )
-        try:  # pragma: no cover - depends on the NumPy version in use.
-            legacy = importlib.import_module("numpy.core.numerictypes")
-        except Exception:
-            legacy = None
-        else:
-            if isinstance(legacy, ModuleType) and legacy not in modules:
-                modules.append(legacy)
-
-    def _issubclass(candidate: object, classinfo: object) -> bool:
-        try:
-            return issubclass(candidate, classinfo)  # type: ignore[arg-type]
-        except TypeError:
-            return False
-
-    for module in modules:
-        if not hasattr(module, "issubclass_"):
-            setattr(module, "issubclass_", _issubclass)
-
-    if not hasattr(np, "issubclass_"):
-        np.issubclass_ = _issubclass  # type: ignore[attr-defined]
-
-
-_ensure_numerictypes_compatibility()
 import pytesseract
 
 
@@ -117,24 +52,12 @@ def load_image(path: Path) -> np.ndarray:
     return image
 
 
-def detect_red_markers(image: np.ndarray, min_area: float = 30.0) -> list[MarkerDetection]:
+def detect_red_markers(image: np.ndarray, min_area: float = 30.0) -> List[MarkerDetection]:
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-
-    def make_bound(values: Sequence[int]) -> np.ndarray:
-        """Create a contiguous HSV bound matching the source image dtype."""
-
-        bound = np.asarray(values, dtype=hsv.dtype)
-        # OpenCV expects the thresholds to be treated as scalars, but newer
-        # versions are stricter about the underlying array type. Ensuring a
-        # contiguous `ndarray` avoids the "lowerb is not a numpy array" error
-        # triggered when the bounds come through as Python sequences under
-        # certain NumPy/OpenCV combinations.
-        return np.ascontiguousarray(bound.reshape(1, 1, -1))
-
-    lower_red1 = make_bound((0, 100, 80))
-    upper_red1 = make_bound((10, 255, 255))
-    lower_red2 = make_bound((160, 100, 80))
-    upper_red2 = make_bound((179, 255, 255))
+    lower_red1 = np.array([0, 100, 80], dtype=np.uint8)
+    upper_red1 = np.array([10, 255, 255], dtype=np.uint8)
+    lower_red2 = np.array([160, 100, 80], dtype=np.uint8)
+    upper_red2 = np.array([179, 255, 255], dtype=np.uint8)
 
     mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
     mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
@@ -146,7 +69,7 @@ def detect_red_markers(image: np.ndarray, min_area: float = 30.0) -> list[Marker
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    detections: list[MarkerDetection] = []
+    detections: List[MarkerDetection] = []
     for contour in contours:
         area = cv2.contourArea(contour)
         if area < min_area:
@@ -166,53 +89,13 @@ def detect_red_markers(image: np.ndarray, min_area: float = 30.0) -> list[Marker
     return detections[:2]
 
 
-def _marker_bounds(marker: MarkerDetection) -> Tuple[int, int, int, int]:
-    """Return the bounding box of a marker contour as ``(x_min, y_min, x_max, y_max)``."""
-
-    x, y, w, h = cv2.boundingRect(marker.contour)
-    return x, y, x + w, y + h
-
-
-def crop_between_markers(
-    image: np.ndarray,
-    markers: Sequence[MarkerDetection],
-    padding: int = 10,
-) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
-    """Crop the region enclosed by the detected red marker circles.
-
-    The two largest markers are interpreted as the top-left and bottom-right
-    corners of the desired crop. The crop is taken *inside* the circles by
-    aligning the crop boundaries with the inner edges of each marker's
-    bounding box. The ``padding`` parameter expands the crop outward if a
-    slightly looser framing is desired.
-    """
-
-    if len(markers) < 2:
-        raise RuntimeError("At least two markers are required to compute a crop.")
-
-    # Use the diagonal of the image (x + y) to determine which marker sits in
-    # the top-left versus bottom-right corner of the frame.
-    sorted_markers = sorted(markers, key=lambda m: m.center[0] + m.center[1])
-    top_left = sorted_markers[0]
-    bottom_right = sorted_markers[-1]
-
-    tl_x_min, tl_y_min, tl_x_max, tl_y_max = _marker_bounds(top_left)
-    br_x_min, br_y_min, _, _ = _marker_bounds(bottom_right)
-
-    x_min = max(tl_x_max - padding, 0)
-    y_min = max(tl_y_max - padding, 0)
-    x_max = min(br_x_min + padding, image.shape[1])
-    y_max = min(br_y_min + padding, image.shape[0])
-
-    # Fallback to the previous centre-based logic if the marker arrangement
-    # does not yield a valid interior crop.
-    if x_min >= x_max or y_min >= y_max:
-        xs = [m.center[0] for m in markers]
-        ys = [m.center[1] for m in markers]
-        x_min = max(min(xs) - padding, 0)
-        y_min = max(min(ys) - padding, 0)
-        x_max = min(max(xs) + padding, image.shape[1])
-        y_max = min(max(ys) + padding, image.shape[0])
+def crop_between_markers(image: np.ndarray, markers: Sequence[MarkerDetection], padding: int = 10) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+    xs = [m.center[0] for m in markers]
+    ys = [m.center[1] for m in markers]
+    x_min = max(min(xs) - padding, 0)
+    y_min = max(min(ys) - padding, 0)
+    x_max = min(max(xs) + padding, image.shape[1])
+    y_max = min(max(ys) + padding, image.shape[0])
 
     cropped = image[y_min:y_max, x_min:x_max]
     if cropped.size == 0:
@@ -244,55 +127,7 @@ def prepare_digits_region(image: np.ndarray, width_ratio: float = 0.35, height_r
     return image[y_start:, x_start:], (x_start, y_start)
 
 
-def locate_flow_display(region: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int]]:
-    """Locate the dark display housing the white flow digits within a crop.
-
-    The function thresholds the image to find dark, high-contrast regions and
-    selects the most prominent rectangular candidate whose aspect ratio matches
-    the digital display. The returned origin corresponds to the top-left corner
-    of the detected display relative to ``region``.
-    """
-
-    gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, dark_mask = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    dark_mask = cv2.morphologyEx(dark_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-    contours, _ = cv2.findContours(dark_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        raise RuntimeError("Unable to locate the flow display inside the cropped image.")
-
-    height, width = region.shape[:2]
-    best_candidate: Tuple[int, int, int, int] | None = None
-    best_area = 0
-    for contour in contours:
-        x, y, w, h = cv2.boundingRect(contour)
-        area = w * h
-        if area <= 0:
-            continue
-
-        area_ratio = area / float(width * height)
-        if area_ratio < 0.01 or area_ratio > 0.5:
-            continue
-
-        aspect_ratio = w / float(h)
-        if aspect_ratio < 1.2 or aspect_ratio > 6.0:
-            continue
-
-        if area > best_area:
-            best_area = area
-            best_candidate = (x, y, w, h)
-
-    if best_candidate is None:
-        raise RuntimeError("Unable to isolate a display candidate from the crop.")
-
-    x, y, w, h = best_candidate
-    return region[y:y + h, x:x + w], (x, y)
-
-
-def run_ocr_on_region(region: np.ndarray) -> list[OcrDetection]:
+def run_ocr_on_region(region: np.ndarray) -> List[OcrDetection]:
     gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -301,7 +136,7 @@ def run_ocr_on_region(region: np.ndarray) -> list[OcrDetection]:
     config = "--psm 6 -c tessedit_char_whitelist=0123456789."
     data = pytesseract.image_to_data(thresh, config=config, output_type=pytesseract.Output.DICT)
 
-    detections: list[OcrDetection] = []
+    detections: List[OcrDetection] = []
     for text, conf, x, y, w, h in zip(data["text"], data["conf"], data["left"], data["top"], data["width"], data["height"]):
         if not text.strip():
             continue
@@ -378,18 +213,7 @@ def main() -> None:
     markers_path = output_dir / "marker_detection.png"
     cv2.imwrite(str(markers_path), annotated_markers)
 
-    try:
-        digits_region, local_origin = locate_flow_display(cropped)
-        origin = (crop_bounds[0] + local_origin[0], crop_bounds[1] + local_origin[1])
-    except RuntimeError as display_error:
-        warnings.warn(
-            f"{display_error} Falling back to the legacy bottom-right crop for OCR.",
-            RuntimeWarning,
-        )
-        digits_region, fallback_origin = prepare_digits_region(
-            image, width_ratio=args.digits_width, height_ratio=args.digits_height
-        )
-        origin = fallback_origin
+    digits_region, origin = prepare_digits_region(image, width_ratio=args.digits_width, height_ratio=args.digits_height)
     digits_region_path = output_dir / "digits_region.png"
     cv2.imwrite(str(digits_region_path), digits_region)
 

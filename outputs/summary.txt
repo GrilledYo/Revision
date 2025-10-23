@@ -1,0 +1,10 @@
+Dye area analysis
+Total pixels: 159460
+Dye pixel count: 9957
+Dye area ratio: 0.0624
+
+Crop bounds (x_min, y_min, x_max, y_max):
+36, 74, 244, 284
+
+Numeric detections:
+No numeric text detected.
