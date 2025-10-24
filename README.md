@@ -31,6 +31,12 @@ Run the analysis from the repository root:
 python process_image.py
 ```
 
+To include a second frame for sparse optical flow, pass the `--second-image` flag (defaults to `screenshot2.png`):
+
+```bash
+python process_image.py --second-image path/to/screenshot2.png
+```
+
 Key command line options:
 
 - `--output`: Directory where results are stored (default: `outputs/`).
@@ -39,13 +45,17 @@ Key command line options:
 
 All generated artifacts are written to the output directory:
 
-- `cropped_region.png`: The rectangle delimited by the red markers.
+- `cropped_region.png`: Color crop between the detected markers in the primary image.
 - `marker_detection.png`: Visualization of the detected marker centers.
 - `dye_mask.png`: Binary mask showing the detected dye.
 - `dye_overlay.png`: Original image with the dye mask overlaid for quick inspection.
 - `digits_region.png`: The bottom-right crop used for OCR.
 - `numeric_readings.csv`: CSV containing the recognized numbers, OCR confidence, and bounding boxes in the original image coordinates.
 - `summary.txt`: Text file summarizing the area statistics and OCR results.
+- `cropped_region_second.png`: Matched crop from the secondary image used for optical flow.
+- `cropped_region_mask.png`: Cropped dye mask corresponding to the marker region.
+- `sparse_flow_vectors.csv`: Sparse optical flow vectors stored as float32 values in `[x, y, delta_x, delta_y]` format.
+- `sparse_flow_visualization.png`: Reference crop overlaid with the sparse vector field arrows.
 
 ## Notes
 

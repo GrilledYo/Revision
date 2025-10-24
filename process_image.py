@@ -11,7 +11,7 @@ import argparse
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -96,6 +96,15 @@ class OcrDetection:
     bbox: Tuple[int, int, int, int]
 
 
+@dataclass
+class SparseFlowResult:
+    """Sparse optical flow vectors between two crops."""
+
+    vectors: np.ndarray  # shape (N, 4) with columns [x, y, delta_x, delta_y]
+    start_points: np.ndarray  # shape (N, 2) original feature coordinates
+    end_points: np.ndarray  # shape (N, 2) tracked feature coordinates
+
+
 def load_image(path: Path) -> np.ndarray:
     image = cv2.imread(str(path))
     if image is None:
@@ -154,9 +163,9 @@ def enhance_contrast(image: np.ndarray) -> np.ndarray:
 
 def crop_between_markers(
     image: np.ndarray,
-    image2: np.darray,
     markers: Sequence[MarkerDetection],
     padding: int = DEFAULT_CROP_PADDING,
+    source: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
     mask = np.zeros(image.shape[:2], dtype=np.uint8)
     for marker in markers:
@@ -172,15 +181,96 @@ def crop_between_markers(
     x_max = min(x + w + padding, image.shape[1])
     y_max = min(y + h + padding, image.shape[0])
 
-    cropped = image[y_min:y_max, x_min:x_max].copy()
+    if source is None:
+        source = image
+
+    if source.shape[0] < y_max or source.shape[1] < x_max:
+        raise ValueError("Source image is smaller than the computed crop bounds.")
+
+    cropped = source[y_min:y_max, x_min:x_max].copy()
     if cropped.size == 0:
         raise RuntimeError("Crop produced an empty image. Check marker positions.")
 
-    cropped_mask = image2[y_min:y_max, x_min:x_max]
-    #masked_cropped = cv2.bitwise_and(cropped, cropped, mask=cropped_mask)
-    #enhanced = enhance_contrast(masked_cropped)
-    final_crop = cropped_mask#cv2.bitwise_and(enhanced, enhanced, mask=cropped_mask)
-    return final_crop, (x_min, y_min, x_max, y_max)
+    return cropped, (x_min, y_min, x_max, y_max)
+
+
+def compute_sparse_vector_field(reference: np.ndarray, target: np.ndarray) -> SparseFlowResult:
+    """Compute sparse optical flow vectors between two cropped regions."""
+
+    if reference.shape[:2] != target.shape[:2]:
+        raise ValueError("Cropped regions must have matching spatial dimensions.")
+
+    def to_grayscale(image: np.ndarray) -> np.ndarray:
+        if image.ndim == 2:
+            return image
+        return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    prev_gray = to_grayscale(reference)
+    next_gray = to_grayscale(target)
+
+    feature_params = dict(maxCorners=200, qualityLevel=0.01, minDistance=5, blockSize=7)
+    features = cv2.goodFeaturesToTrack(prev_gray, mask=None, **feature_params)
+
+    if features is None:
+        empty = np.empty((0, 4), dtype=np.float32)
+        empty_points = np.empty((0, 2), dtype=np.float32)
+        return SparseFlowResult(vectors=empty, start_points=empty_points, end_points=empty_points)
+
+    flow, status, _ = cv2.calcOpticalFlowPyrLK(
+        prev_gray,
+        next_gray,
+        features,
+        None,
+        winSize=(21, 21),
+        maxLevel=3,
+        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+    )
+
+    if flow is None or status is None:
+        empty = np.empty((0, 4), dtype=np.float32)
+        empty_points = np.empty((0, 2), dtype=np.float32)
+        return SparseFlowResult(vectors=empty, start_points=empty_points, end_points=empty_points)
+
+    valid = status.flatten() == 1
+    start_points = features[valid].reshape(-1, 2)
+    end_points = flow[valid].reshape(-1, 2)
+
+    if start_points.size == 0:
+        empty = np.empty((0, 4), dtype=np.float32)
+        empty_points = np.empty((0, 2), dtype=np.float32)
+        return SparseFlowResult(vectors=empty, start_points=empty_points, end_points=empty_points)
+
+    displacements = end_points - start_points
+    vectors = np.hstack((start_points, displacements)).astype(np.float32)
+    return SparseFlowResult(
+        vectors=vectors,
+        start_points=start_points.astype(np.float32),
+        end_points=end_points.astype(np.float32),
+    )
+
+
+def draw_sparse_flow(image: np.ndarray, flow: SparseFlowResult) -> np.ndarray:
+    """Overlay sparse flow vectors on the reference crop."""
+
+    overlay = image.copy()
+    for start, disp in zip(flow.start_points, flow.vectors[:, 2:4]):
+        x, y = start
+        dx, dy = disp
+        pt1 = (int(round(x)), int(round(y)))
+        pt2 = (int(round(x + dx)), int(round(y + dy)))
+        cv2.arrowedLine(overlay, pt1, pt2, (0, 255, 0), thickness=1, tipLength=0.3)
+    return overlay
+
+
+def save_sparse_flow_to_csv(vectors: np.ndarray, csv_path: Path) -> None:
+    """Persist sparse flow vectors to CSV with header."""
+
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["x", "y", "delta_x", "delta_y"])
+        for x, y, dx, dy in vectors:
+            writer.writerow([f"{x:.6f}", f"{y:.6f}", f"{dx:.6f}", f"{dy:.6f}"])
 
 
 def compute_dye_area(image: np.ndarray) -> DyeAreaResult:
@@ -344,6 +434,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("image", type=Path, nargs="?", default=Path("screenshot.png"), help="Path to the input image.")
     parser.add_argument("--output", type=Path, default=Path("outputs"), help="Directory where outputs will be saved.")
     parser.add_argument(
+        "--second-image",
+        type=Path,
+        default=Path("screenshot2.png"),
+        dest="second_image",
+        help="Path to the second image used for sparse vector field calculation.",
+    )
+    parser.add_argument(
         "--padding",
         type=int,
         default=DEFAULT_CROP_PADDING,
@@ -370,6 +467,7 @@ def main() -> None:
     args = parse_args()
 
     image = load_image(args.image)
+    second_image = load_image(args.second_image)
     output_dir = args.output
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -379,11 +477,25 @@ def main() -> None:
     overlay_path = output_dir / "dye_overlay.png"
     overlay = overlay_mask(image, dye_area.mask)
     cv2.imwrite(str(overlay_path), overlay)
-    
+
     markers = detect_red_markers(image)
-    cropped, crop_bounds = crop_between_markers(image, dye_area.mask, markers, padding=args.padding)
+    cropped_color, crop_bounds = crop_between_markers(image, markers, padding=args.padding)
+    cropped_mask, _ = crop_between_markers(image, markers, padding=args.padding, source=dye_area.mask)
+    cropped_second, _ = crop_between_markers(image, markers, padding=args.padding, source=second_image)
+
     cropped_path = output_dir / "cropped_region.png"
-    cv2.imwrite(str(cropped_path), cropped)
+    cv2.imwrite(str(cropped_path), cropped_color)
+    cropped_mask_path = output_dir / "cropped_region_mask.png"
+    cv2.imwrite(str(cropped_mask_path), cropped_mask)
+    cropped_second_path = output_dir / "cropped_region_second.png"
+    cv2.imwrite(str(cropped_second_path), cropped_second)
+
+    flow_result = compute_sparse_vector_field(cropped_color, cropped_second)
+    flow_csv_path = output_dir / "sparse_flow_vectors.csv"
+    save_sparse_flow_to_csv(flow_result.vectors, flow_csv_path)
+    flow_overlay = draw_sparse_flow(cropped_color, flow_result)
+    flow_vis_path = output_dir / "sparse_flow_visualization.png"
+    cv2.imwrite(str(flow_vis_path), flow_overlay)
 
     annotated_markers = annotate_markers(image, markers)
     markers_path = output_dir / "marker_detection.png"
@@ -410,6 +522,13 @@ def main() -> None:
         summary_file.write(
             f"{crop_bounds[0]}, {crop_bounds[1]}, {crop_bounds[2]}, {crop_bounds[3]}\n"
         )
+        summary_file.write("\nSparse vector field:\n")
+        summary_file.write(
+            "Vectors stored as float32 numpy array with rows [x, y, delta_x, delta_y].\n"
+        )
+        summary_file.write(f"Vector count: {flow_result.vectors.shape[0]}\n")
+        summary_file.write(f"CSV export: {flow_csv_path.name}\n")
+        summary_file.write(f"Visualization: {flow_vis_path.name}\n")
         summary_file.write("\nNumeric detections:\n")
         if digit_detections:
             for det in digit_detections:
@@ -422,8 +541,12 @@ def main() -> None:
 
     print("Analysis complete.")
     print(f"Cropped region saved to: {cropped_path}")
+    print(f"Cropped mask saved to: {cropped_mask_path}")
+    print(f"Second cropped region saved to: {cropped_second_path}")
     print(f"Dye mask saved to: {dye_mask_path}")
     print(f"Dye overlay saved to: {overlay_path}")
+    print(f"Sparse flow CSV saved to: {flow_csv_path}")
+    print(f"Sparse flow visualization saved to: {flow_vis_path}")
     print(f"Digits region saved to: {digits_region_path}")
     print(f"Processed digits preview saved to: {processed_digits_path}")
     print(f"Numeric readings CSV saved to: {csv_path}")
