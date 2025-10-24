@@ -214,7 +214,7 @@ def prepare_digits_region(
 def preprocess_digits_region(
     region: np.ndarray,
     scale_factor: float = DIGIT_SCALE_FACTOR,
-) -> Tuple[np.ndarray, float, float, int, np.ndarray]:
+) -> Tuple[np.ndarray, float, float, int]:
     gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=DIGIT_CLAHE_CLIP_LIMIT, tileGridSize=DIGIT_CLAHE_TILE_GRID_SIZE)
     enhanced = clahe.apply(gray)
@@ -235,7 +235,7 @@ def preprocess_digits_region(
     scale_x = cleaned.shape[1] / max(region.shape[1], 1)
     scale_y = cleaned.shape[0] / max(region.shape[0], 1)
 
-    padded_binary = cv2.copyMakeBorder(
+    padded = cv2.copyMakeBorder(
         cleaned,
         DIGIT_BORDER_PADDING,
         DIGIT_BORDER_PADDING,
@@ -245,21 +245,11 @@ def preprocess_digits_region(
         value=255,
     )
 
-    padded_gray = cv2.copyMakeBorder(
-        scaled,
-        DIGIT_BORDER_PADDING,
-        DIGIT_BORDER_PADDING,
-        DIGIT_BORDER_PADDING,
-        DIGIT_BORDER_PADDING,
-        borderType=cv2.BORDER_CONSTANT,
-        value=255,
-    )
-
-    return padded_binary, scale_x, scale_y, DIGIT_BORDER_PADDING, padded_gray
+    return padded, scale_x, scale_y, DIGIT_BORDER_PADDING
 
 
 def run_ocr_on_region(region: np.ndarray) -> Tuple[List[OcrDetection], np.ndarray]:
-    processed, scale_x, scale_y, padding, padded_gray = preprocess_digits_region(region)
+    processed, scale_x, scale_y, padding = preprocess_digits_region(region)
 
     def collect_detections(image: np.ndarray) -> List[OcrDetection]:
         data = pytesseract.image_to_data(image, config=TESSERACT_CONFIG, output_type=pytesseract.Output.DICT)
@@ -295,14 +285,7 @@ def run_ocr_on_region(region: np.ndarray) -> Tuple[List[OcrDetection], np.ndarra
             )
         return detections
 
-    candidates = (
-        processed,
-        cv2.bitwise_not(processed),
-        padded_gray,
-        cv2.bitwise_not(padded_gray),
-    )
-
-    for candidate in candidates:
+    for candidate in (processed, cv2.bitwise_not(processed)):
         detections = collect_detections(candidate)
         if detections:
             return detections, candidate
