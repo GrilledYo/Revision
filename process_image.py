@@ -54,6 +54,7 @@ DIGIT_CLAHE_TILE_GRID_SIZE = (2, 2)  # CLAHE tile grid size for digit preprocess
 DIGIT_SCALE_FACTOR = 2  # Upscaling factor applied before thresholding to improve OCR accuracy.
 DIGIT_THRESH_KERNEL_SIZE = (1, 1)  # Kernel size for morphological closing on the digit mask.
 DIGIT_MEDIAN_BLUR_SIZE = 1  # Median blur aperture size for removing salt-and-pepper noise after thresholding.
+DIGIT_BORDER_PADDING = 10  # Extra white border (in pixels) added around the processed digit crop before OCR.
 
 # OCR
 TESSERACT_CONFIG = "--psm 7 --oem 3 -c tessedit_char_whitelist=0123456789."  # OCR engine configuration string.
@@ -213,7 +214,7 @@ def prepare_digits_region(
 def preprocess_digits_region(
     region: np.ndarray,
     scale_factor: float = DIGIT_SCALE_FACTOR,
-) -> Tuple[np.ndarray, float, float]:
+) -> Tuple[np.ndarray, float, float, int]:
     gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=DIGIT_CLAHE_CLIP_LIMIT, tileGridSize=DIGIT_CLAHE_TILE_GRID_SIZE)
     enhanced = clahe.apply(gray)
@@ -233,44 +234,63 @@ def preprocess_digits_region(
 
     scale_x = cleaned.shape[1] / max(region.shape[1], 1)
     scale_y = cleaned.shape[0] / max(region.shape[0], 1)
-    return cleaned, scale_x, scale_y
+
+    padded = cv2.copyMakeBorder(
+        cleaned,
+        DIGIT_BORDER_PADDING,
+        DIGIT_BORDER_PADDING,
+        DIGIT_BORDER_PADDING,
+        DIGIT_BORDER_PADDING,
+        borderType=cv2.BORDER_CONSTANT,
+        value=255,
+    )
+
+    return padded, scale_x, scale_y, DIGIT_BORDER_PADDING
 
 
 def run_ocr_on_region(region: np.ndarray) -> Tuple[List[OcrDetection], np.ndarray]:
-    processed, scale_x, scale_y = preprocess_digits_region(region)
+    processed, scale_x, scale_y, padding = preprocess_digits_region(region)
 
-    data = pytesseract.image_to_data(processed, config=TESSERACT_CONFIG, output_type=pytesseract.Output.DICT)
+    def collect_detections(image: np.ndarray) -> List[OcrDetection]:
+        data = pytesseract.image_to_data(image, config=TESSERACT_CONFIG, output_type=pytesseract.Output.DICT)
+        detections: List[OcrDetection] = []
+        for text, conf, x, y, w, h in zip(
+            data["text"],
+            data["conf"],
+            data["left"],
+            data["top"],
+            data["width"],
+            data["height"],
+        ):
+            if not text.strip():
+                continue
+            try:
+                conf_value = float(conf)
+            except ValueError:
+                conf_value = -1.0
+            if conf_value < 0:
+                continue
+            cleaned_text = text.strip()
+            if any(ch not in "0123456789." for ch in cleaned_text):
+                continue
 
-    detections: List[OcrDetection] = []
-    for text, conf, x, y, w, h in zip(
-        data["text"],
-        data["conf"],
-        data["left"],
-        data["top"],
-        data["width"],
-        data["height"],
-    ):
-        if not text.strip():
-            continue
-        try:
-            conf_value = float(conf)
-        except ValueError:
-            conf_value = -1.0
-        if conf_value < 0:
-            continue
-        cleaned_text = text.strip()
-        if any(ch not in "0123456789." for ch in cleaned_text):
-            continue
+            x_unpadded = max(x - padding, 0)
+            y_unpadded = max(y - padding, 0)
+            x_orig = int(round(x_unpadded / scale_x))
+            y_orig = int(round(y_unpadded / scale_y))
+            w_orig = int(round(w / scale_x))
+            h_orig = int(round(h / scale_y))
+            detections.append(
+                OcrDetection(text=cleaned_text, confidence=conf_value, bbox=(x_orig, y_orig, w_orig, h_orig))
+            )
+        return detections
 
-        x_orig = int(round(x / scale_x))
-        y_orig = int(round(y / scale_y))
-        w_orig = int(round(w / scale_x))
-        h_orig = int(round(h / scale_y))
-        detections.append(
-            OcrDetection(text=cleaned_text, confidence=conf_value, bbox=(x_orig, y_orig, w_orig, h_orig))
-        )
+    for candidate in (processed, cv2.bitwise_not(processed)):
+        detections = collect_detections(candidate)
+        if detections:
+            return detections, candidate
 
-    return detections, processed
+    return [], processed
 
 
 def save_digits_to_csv(detections: Sequence[OcrDetection], csv_path: Path, origin: Tuple[int, int]) -> None:
