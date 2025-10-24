@@ -210,45 +210,6 @@ def prepare_digits_region(
     return image[y_start:, x_start:], (x_start, y_start)
 
 
-def refine_digits_region(region: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int], np.ndarray | None]:
-    """Tighten the ROI around the segmented digits before OCR.
-
-    The digits occupy nearly the entire height of the cropped area but leave
-    horizontal margins that confuse OCR. A morphology-based crop isolates the
-    most prominent high-contrast structures so Tesseract receives an input that
-    is primarily the digits themselves.
-    """
-
-    if region.size == 0:
-        return region, (0, 0), None
-
-    gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    # Ensure illuminated segments become foreground regardless of polarity.
-    if np.mean(binary) > 127:
-        binary = cv2.bitwise_not(binary)
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
-    cleaned = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-    nonzero = cv2.findNonZero(cleaned)
-    if nonzero is None:
-        return region, (0, 0), cleaned
-
-    x, y, w, h = cv2.boundingRect(nonzero)
-    pad_x = max(int(region.shape[1] * 0.02), 2)
-    pad_y = max(int(region.shape[0] * 0.02), 2)
-    x_min = max(x - pad_x, 0)
-    y_min = max(y - pad_y, 0)
-    x_max = min(x + w + pad_x, region.shape[1])
-    y_max = min(y + h + pad_y, region.shape[0])
-
-    cropped = region[y_min:y_max, x_min:x_max].copy()
-    return cropped, (x_min, y_min), cleaned
-
-
 def preprocess_digits_region(
     region: np.ndarray,
     scale_factor: float = DIGIT_SCALE_FACTOR,
@@ -310,61 +271,6 @@ def run_ocr_on_region(region: np.ndarray) -> Tuple[List[OcrDetection], np.ndarra
         )
 
     return detections, processed
-
-
-def _clean_numeric_text(text: str) -> str:
-    cleaned = "".join(ch for ch in text if ch in "0123456789.")
-    if cleaned.count(".") > 1:
-        first = cleaned.find(".")
-        cleaned = cleaned[: first + 1] + cleaned[first + 1 :].replace(".", "")
-    return cleaned
-
-
-def assemble_numeric_reading(detections: Sequence[OcrDetection]) -> str:
-    """Merge OCR tokens left-to-right while removing overlaps."""
-
-    if not detections:
-        return ""
-
-    sorted_detections = sorted(detections, key=lambda det: det.bbox[0])
-    merged: List[OcrDetection] = []
-
-    for det in sorted_detections:
-        if not merged:
-            merged.append(det)
-            continue
-
-        prev = merged[-1]
-        prev_x, _, prev_w, _ = prev.bbox
-        curr_x, _, curr_w, _ = det.bbox
-        prev_end = prev_x + prev_w
-        curr_end = curr_x + curr_w
-
-        overlap = min(prev_end, curr_end) - max(prev_x, curr_x)
-        min_width = max(min(prev_w, curr_w), 1)
-
-        if overlap > 0.4 * min_width:
-            if det.confidence > prev.confidence:
-                merged[-1] = det
-            continue
-
-        merged.append(det)
-
-    combined_text = "".join(det.text for det in merged)
-    return _clean_numeric_text(combined_text)
-
-
-def derive_numeric_reading(
-    detections: Sequence[OcrDetection], processed_image: np.ndarray
-) -> str:
-    """Generate a single numeric string with fallback OCR if needed."""
-
-    assembled = assemble_numeric_reading(detections)
-    if assembled:
-        return assembled
-
-    fallback = pytesseract.image_to_string(processed_image, config=TESSERACT_CONFIG)
-    return _clean_numeric_text(fallback)
 
 
 def save_digits_to_csv(detections: Sequence[OcrDetection], csv_path: Path, origin: Tuple[int, int]) -> None:
@@ -467,27 +373,11 @@ def main() -> None:
     digits_region_path = output_dir / "digits_region.png"
     cv2.imwrite(str(digits_region_path), digits_region)
 
-    refined_region, offset, digit_mask = refine_digits_region(digits_region)
-    refined_origin = (origin[0] + offset[0], origin[1] + offset[1])
-    refined_region_path = output_dir / "digits_region_refined.png"
-    cv2.imwrite(str(refined_region_path), refined_region)
-    if digit_mask is not None:
-        digit_mask_path = output_dir / "digits_region_mask.png"
-        cv2.imwrite(str(digit_mask_path), digit_mask)
-
-    digit_detections, processed_digits = run_ocr_on_region(refined_region)
+    digit_detections, processed_digits = run_ocr_on_region(digits_region)
     processed_digits_path = output_dir / "digits_region_processed.png"
     cv2.imwrite(str(processed_digits_path), processed_digits)
-    numeric_reading = derive_numeric_reading(digit_detections, processed_digits)
-    reading_path = output_dir / "numeric_reading.txt"
-    with reading_path.open("w", encoding="utf-8") as reading_file:
-        if numeric_reading:
-            reading_file.write(f"{numeric_reading}\n")
-        else:
-            reading_file.write("No numeric reading detected.\n")
-
     csv_path = output_dir / "numeric_readings.csv"
-    save_digits_to_csv(digit_detections, csv_path, refined_origin)
+    save_digits_to_csv(digit_detections, csv_path, origin)
 
     summary_path = output_dir / "summary.txt"
     with summary_path.open("w", encoding="utf-8") as summary_file:
@@ -505,24 +395,18 @@ def main() -> None:
             for det in digit_detections:
                 x, y, w, h = det.bbox
                 summary_file.write(
-                    f"text={det.text} confidence={det.confidence:.2f} bbox={(x + refined_origin[0], y + refined_origin[1], w, h)}\n"
+                    f"text={det.text} confidence={det.confidence:.2f} bbox={(x + origin[0], y + origin[1], w, h)}\n"
                 )
         else:
             summary_file.write("No numeric text detected.\n")
-        summary_file.write("\n")
-        summary_file.write(f"Final numeric reading: {numeric_reading or 'N/A'}\n")
 
     print("Analysis complete.")
     print(f"Cropped region saved to: {cropped_path}")
     print(f"Dye mask saved to: {dye_mask_path}")
     print(f"Dye overlay saved to: {overlay_path}")
     print(f"Digits region saved to: {digits_region_path}")
-    print(f"Refined digits region saved to: {refined_region_path}")
-    if digit_mask is not None:
-        print(f"Digit mask saved to: {digit_mask_path}")
     print(f"Processed digits preview saved to: {processed_digits_path}")
     print(f"Numeric readings CSV saved to: {csv_path}")
-    print(f"Numeric reading text saved to: {reading_path}")
     print(f"Summary saved to: {summary_path}")
 
 
