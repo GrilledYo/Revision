@@ -49,16 +49,11 @@ DEFAULT_DIGITS_WIDTH_RATIO = 0.25  # Horizontal proportion of the image captured
 DEFAULT_DIGITS_HEIGHT_RATIO = 0.15  # Vertical proportion of the image captured for the bottom-right digits crop.
 
 # Digit preprocessing
-DIGIT_CLAHE_CLIP_LIMIT = 2.5  # CLAHE clip limit for digit preprocessing to sharpen contrast.
-DIGIT_CLAHE_TILE_GRID_SIZE = (4, 4)  # CLAHE tile grid size for digit preprocessing.
-DIGIT_SCALE_FACTOR = 3  # Upscaling factor applied before thresholding to improve OCR accuracy.
-DIGIT_BILATERAL_DIAMETER = 7  # Diameter of the pixel neighborhood used for bilateral filtering the digits crop.
-DIGIT_BILATERAL_SIGMA_COLOR = 50  # Sigma value controlling color filtering strength in the bilateral filter.
-DIGIT_BILATERAL_SIGMA_SPACE = 50  # Sigma value controlling spatial filtering strength in the bilateral filter.
-DIGIT_ADAPTIVE_BLOCK_SIZE = 31  # Window size for adaptive thresholding of the digits crop (must be odd).
-DIGIT_ADAPTIVE_C = 5  # Constant subtracted during adaptive thresholding to fine-tune digit separation.
-DIGIT_MORPH_KERNEL_SIZE = (3, 3)  # Kernel size used for morphological cleanup of the thresholded digits.
-DIGIT_DILATE_ITERATIONS = 1  # Number of dilation passes to slightly thicken digit strokes for visibility.
+DIGIT_CLAHE_CLIP_LIMIT = 1 # CLAHE clip limit for digit preprocessing to sharpen contrast.
+DIGIT_CLAHE_TILE_GRID_SIZE = (2, 2)  # CLAHE tile grid size for digit preprocessing.
+DIGIT_SCALE_FACTOR = 2  # Upscaling factor applied before thresholding to improve OCR accuracy.
+DIGIT_THRESH_KERNEL_SIZE = (1, 1)  # Kernel size for morphological closing on the digit mask.
+DIGIT_MEDIAN_BLUR_SIZE = 1  # Median blur aperture size for removing salt-and-pepper noise after thresholding.
 
 # OCR
 TESSERACT_CONFIG = "--psm 7 --oem 3 -c tessedit_char_whitelist=0123456789."  # OCR engine configuration string.
@@ -158,15 +153,15 @@ def enhance_contrast(image: np.ndarray) -> np.ndarray:
 
 def crop_between_markers(
     image: np.ndarray,
-    dye_mask: np.ndarray,
+    image2: np.darray,
     markers: Sequence[MarkerDetection],
     padding: int = DEFAULT_CROP_PADDING,
 ) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
-    marker_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
     for marker in markers:
-        cv2.drawContours(marker_mask, [marker.contour], contourIdx=-1, color=255, thickness=-1)
+        cv2.drawContours(mask, [marker.contour], contourIdx=-1, color=255, thickness=-1)
 
-    nonzero = cv2.findNonZero(marker_mask)
+    nonzero = cv2.findNonZero(mask)
     if nonzero is None:
         raise RuntimeError("Could not determine region enclosed by red markers.")
 
@@ -180,10 +175,10 @@ def crop_between_markers(
     if cropped.size == 0:
         raise RuntimeError("Crop produced an empty image. Check marker positions.")
 
-    cropped_mask = dye_mask[y_min:y_max, x_min:x_max]
+    cropped_mask = image2[y_min:y_max, x_min:x_max]
     #masked_cropped = cv2.bitwise_and(cropped, cropped, mask=cropped_mask)
     #enhanced = enhance_contrast(masked_cropped)
-    final_crop = cropped_mask  # cv2.bitwise_and(enhanced, enhanced, mask=cropped_mask)
+    final_crop = cropped_mask#cv2.bitwise_and(enhanced, enhanced, mask=cropped_mask)
     return final_crop, (x_min, y_min, x_max, y_max)
 
 
@@ -222,36 +217,19 @@ def preprocess_digits_region(
     gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=DIGIT_CLAHE_CLIP_LIMIT, tileGridSize=DIGIT_CLAHE_TILE_GRID_SIZE)
     enhanced = clahe.apply(gray)
-    normalized = cv2.normalize(enhanced, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
 
     scaled = cv2.resize(
-        normalized,
+        enhanced,
         dsize=None,
         fx=scale_factor,
         fy=scale_factor,
         interpolation=cv2.INTER_CUBIC,
     )
 
-    denoised = cv2.bilateralFilter(
-        scaled,
-        d=DIGIT_BILATERAL_DIAMETER,
-        sigmaColor=DIGIT_BILATERAL_SIGMA_COLOR,
-        sigmaSpace=DIGIT_BILATERAL_SIGMA_SPACE,
-    )
-
-    thresh = cv2.adaptiveThreshold(
-        denoised,
-        maxValue=255,
-        adaptiveMethod=cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        thresholdType=cv2.THRESH_BINARY_INV,
-        blockSize=DIGIT_ADAPTIVE_BLOCK_SIZE,
-        C=DIGIT_ADAPTIVE_C,
-    )
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, DIGIT_MORPH_KERNEL_SIZE)
+    _, thresh = cv2.threshold(scaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, DIGIT_THRESH_KERNEL_SIZE)
     cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
-    cleaned = cv2.dilate(cleaned, kernel, iterations=DIGIT_DILATE_ITERATIONS)
-    cleaned = cv2.bitwise_not(cleaned)
+    cleaned = cv2.medianBlur(cleaned, DIGIT_MEDIAN_BLUR_SIZE)
 
     scale_x = cleaned.shape[1] / max(region.shape[1], 1)
     scale_y = cleaned.shape[0] / max(region.shape[0], 1)
