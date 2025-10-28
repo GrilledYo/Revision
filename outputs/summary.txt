@@ -6,5 +6,11 @@ Dye area ratio: 0.0556
 Crop bounds (x_min, y_min, x_max, y_max):
 54, 89, 198, 236
 
+Sparse vector field:
+Vectors stored as float32 numpy array with rows [x, y, delta_x, delta_y].
+Vector count: 58
+CSV export: sparse_flow_vectors.csv
+Visualization: sparse_flow_visualization.png
+
 Numeric detections:
 No numeric text detected.
