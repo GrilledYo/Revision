@@ -11,7 +11,7 @@ import argparse
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -194,6 +194,23 @@ def crop_between_markers(
     return cropped, (x_min, y_min, x_max, y_max)
 
 
+def crop_with_bounds(image: np.ndarray, bounds: Tuple[int, int, int, int]) -> np.ndarray:
+    """Crop the image using precomputed bounds."""
+
+    x_min, y_min, x_max, y_max = bounds
+    h, w = image.shape[:2]
+    x_min = max(x_min, 0)
+    y_min = max(y_min, 0)
+    x_max = min(x_max, w)
+    y_max = min(y_max, h)
+    if x_max <= x_min or y_max <= y_min:
+        raise RuntimeError("Invalid crop bounds for the given frame.")
+    cropped = image[y_min:y_max, x_min:x_max]
+    if cropped.size == 0:
+        raise RuntimeError("Cropping with the provided bounds produced an empty image.")
+    return cropped.copy()
+
+
 def compute_sparse_vector_field(reference: np.ndarray, target: np.ndarray) -> SparseFlowResult:
     """Compute sparse optical flow vectors between two cropped regions."""
 
@@ -262,15 +279,23 @@ def draw_sparse_flow(image: np.ndarray, flow: SparseFlowResult) -> np.ndarray:
     return overlay
 
 
-def save_sparse_flow_to_csv(vectors: np.ndarray, csv_path: Path) -> None:
-    """Persist sparse flow vectors to CSV with header."""
+def save_sparse_flow_sequence_to_csv(flow_vectors: Iterable[np.ndarray], csv_path: Path) -> None:
+    """Persist a sequence of sparse flow vectors to CSV with boundary markers."""
 
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="", encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow(["x", "y", "delta_x", "delta_y"])
-        for x, y, dx, dy in vectors:
-            writer.writerow([f"{x:.6f}", f"{y:.6f}", f"{dx:.6f}", f"{dy:.6f}"])
+        writer.writerow(["x", "y", "delta_x", "delta_y", "new_field"])
+        for vectors in flow_vectors:
+            if vectors.size == 0:
+                continue
+            first = True
+            for x, y, dx, dy in vectors:
+                marker = 1 if first else 0
+                first = False
+                writer.writerow(
+                    [f"{x:.6f}", f"{y:.6f}", f"{dx:.6f}", f"{dy:.6f}", marker]
+                )
 
 
 def compute_dye_area(image: np.ndarray) -> DyeAreaResult:
@@ -430,15 +455,16 @@ def annotate_markers(image: np.ndarray, markers: Sequence[MarkerDetection]) -> n
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Analyze dye flow image with OpenCV.")
-    parser.add_argument("image", type=Path, nargs="?", default=Path("screenshot.png"), help="Path to the input image.")
-    parser.add_argument("--output", type=Path, default=Path("outputs"), help="Directory where outputs will be saved.")
+    parser = argparse.ArgumentParser(description="Analyze dye flow video with OpenCV.")
     parser.add_argument(
-        "--second-image",
+        "video",
         type=Path,
-        default=Path("screenshot2.png"),
-        dest="second_image",
-        help="Path to the second image used for sparse vector field calculation.",
+        nargs="?",
+        default=Path("input.mp4"),
+        help="Path to the input mp4 video containing the experiment.",
+    )
+    parser.add_argument(
+        "--output", type=Path, default=Path("outputs"), help="Directory where outputs will be saved."
     )
     parser.add_argument(
         "--padding",
@@ -466,8 +492,19 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    image = load_image(args.image)
-    second_image = load_image(args.second_image)
+    if not args.video.exists():
+        raise FileNotFoundError(f"Unable to find video at {args.video}")
+
+    cap = cv2.VideoCapture(str(args.video))
+    if not cap.isOpened():
+        raise RuntimeError(f"Unable to open video file {args.video}")
+
+    success, frame = cap.read()
+    if not success or frame is None:
+        cap.release()
+        raise RuntimeError("Video file does not contain any frames.")
+
+    image = frame
     output_dir = args.output
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -481,21 +518,40 @@ def main() -> None:
     markers = detect_red_markers(image)
     cropped_color, crop_bounds = crop_between_markers(image, markers, padding=args.padding)
     cropped_mask, _ = crop_between_markers(image, markers, padding=args.padding, source=dye_area.mask)
-    cropped_second, _ = crop_between_markers(image, markers, padding=args.padding, source=second_image)
+    previous_crop = cropped_color
 
     cropped_path = output_dir / "cropped_region.png"
     cv2.imwrite(str(cropped_path), cropped_color)
     cropped_mask_path = output_dir / "cropped_region_mask.png"
     cv2.imwrite(str(cropped_mask_path), cropped_mask)
-    cropped_second_path = output_dir / "cropped_region_second.png"
-    cv2.imwrite(str(cropped_second_path), cropped_second)
 
-    flow_result = compute_sparse_vector_field(cropped_color, cropped_second)
-    flow_csv_path = output_dir / "sparse_flow_vectors.csv"
-    save_sparse_flow_to_csv(flow_result.vectors, flow_csv_path)
-    flow_overlay = draw_sparse_flow(cropped_color, flow_result)
+    flow_vectors_sequence: List[np.ndarray] = []
+    total_frames = 1
+    frame_pairs = 0
+    total_vectors = 0
     flow_vis_path = output_dir / "sparse_flow_visualization.png"
-    cv2.imwrite(str(flow_vis_path), flow_overlay)
+    flow_overlay_saved = False
+
+    while True:
+        success, frame = cap.read()
+        if not success or frame is None:
+            break
+        total_frames += 1
+        current_crop = crop_with_bounds(frame, crop_bounds)
+        flow_result = compute_sparse_vector_field(previous_crop, current_crop)
+        flow_vectors_sequence.append(flow_result.vectors)
+        frame_pairs += 1
+        total_vectors += flow_result.vectors.shape[0]
+        if flow_result.vectors.size and not flow_overlay_saved:
+            flow_overlay = draw_sparse_flow(previous_crop, flow_result)
+            cv2.imwrite(str(flow_vis_path), flow_overlay)
+            flow_overlay_saved = True
+        previous_crop = current_crop
+
+    cap.release()
+
+    flow_csv_path = output_dir / "sparse_flow_vectors.csv"
+    save_sparse_flow_sequence_to_csv(flow_vectors_sequence, flow_csv_path)
 
     annotated_markers = annotate_markers(image, markers)
     markers_path = output_dir / "marker_detection.png"
@@ -522,13 +578,19 @@ def main() -> None:
         summary_file.write(
             f"{crop_bounds[0]}, {crop_bounds[1]}, {crop_bounds[2]}, {crop_bounds[3]}\n"
         )
-        summary_file.write("\nSparse vector field:\n")
+        summary_file.write("\nVideo analysis:\n")
+        summary_file.write(f"Video file: {args.video.name}\n")
+        summary_file.write(f"Total frames processed: {total_frames}\n")
+        summary_file.write(f"Frame pairs analyzed: {frame_pairs}\n")
+        summary_file.write(f"Total vectors exported: {total_vectors}\n")
         summary_file.write(
-            "Vectors stored as float32 numpy array with rows [x, y, delta_x, delta_y].\n"
+            "Vectors stored per frame pair with columns [x, y, delta_x, delta_y, new_field].\n"
         )
-        summary_file.write(f"Vector count: {flow_result.vectors.shape[0]}\n")
         summary_file.write(f"CSV export: {flow_csv_path.name}\n")
-        summary_file.write(f"Visualization: {flow_vis_path.name}\n")
+        if flow_overlay_saved:
+            summary_file.write(f"First visualization: {flow_vis_path.name}\n")
+        else:
+            summary_file.write("No sparse flow visualization generated (no vectors detected).\n")
         summary_file.write("\nNumeric detections:\n")
         if digit_detections:
             for det in digit_detections:
@@ -540,13 +602,16 @@ def main() -> None:
             summary_file.write("No numeric text detected.\n")
 
     print("Analysis complete.")
+    print(f"Video analyzed: {args.video}")
     print(f"Cropped region saved to: {cropped_path}")
     print(f"Cropped mask saved to: {cropped_mask_path}")
-    print(f"Second cropped region saved to: {cropped_second_path}")
     print(f"Dye mask saved to: {dye_mask_path}")
     print(f"Dye overlay saved to: {overlay_path}")
     print(f"Sparse flow CSV saved to: {flow_csv_path}")
-    print(f"Sparse flow visualization saved to: {flow_vis_path}")
+    if flow_overlay_saved:
+        print(f"Sparse flow visualization saved to: {flow_vis_path}")
+    else:
+        print("No sparse flow visualization generated (no vectors detected).")
     print(f"Digits region saved to: {digits_region_path}")
     print(f"Processed digits preview saved to: {processed_digits_path}")
     print(f"Numeric readings CSV saved to: {csv_path}")
