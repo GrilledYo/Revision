@@ -289,10 +289,8 @@ def save_sparse_flow_sequence_to_csv(flow_vectors: Iterable[np.ndarray], csv_pat
         for vectors in flow_vectors:
             if vectors.size == 0:
                 continue
-            first = True
-            for x, y, dx, dy in vectors:
-                marker = 1 if first else 0
-                first = False
+            for idx, (x, y, dx, dy) in enumerate(vectors):
+                marker = 1 if idx == 0 else 0
                 writer.writerow(
                     [f"{x:.6f}", f"{y:.6f}", f"{dx:.6f}", f"{dy:.6f}", marker]
                 )
