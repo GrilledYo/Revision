@@ -11,7 +11,7 @@ import argparse
 import csv
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple, Union
 
 import cv2
 import numpy as np
@@ -453,13 +453,14 @@ def annotate_markers(image: np.ndarray, markers: Sequence[MarkerDetection]) -> n
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Analyze dye flow video with OpenCV.")
+    parser = argparse.ArgumentParser(description="Analyze dye flow feed with OpenCV.")
     parser.add_argument(
-        "video",
-        type=Path,
-        nargs="?",
-        default=Path("input.mp4"),
-        help="Path to the input mp4 video containing the experiment.",
+        "--camera",
+        default="0",
+        help=(
+            "Virtual camera identifier to read frames from. Provide an integer index or a "
+            "device path such as /dev/video2."
+        ),
     )
     parser.add_argument(
         "--output", type=Path, default=Path("outputs"), help="Directory where outputs will be saved."
@@ -490,12 +491,15 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    if not args.video.exists():
-        raise FileNotFoundError(f"Unable to find video at {args.video}")
+    camera_source: Union[int, str]
+    if isinstance(args.camera, str) and args.camera.isdigit():
+        camera_source = int(args.camera)
+    else:
+        camera_source = args.camera
 
-    cap = cv2.VideoCapture(str(args.video))
+    cap = cv2.VideoCapture(camera_source)
     if not cap.isOpened():
-        raise RuntimeError(f"Unable to open video file {args.video}")
+        raise RuntimeError(f"Unable to open camera source {args.camera}")
 
     success, frame = cap.read()
     if not success or frame is None:
@@ -576,8 +580,8 @@ def main() -> None:
         summary_file.write(
             f"{crop_bounds[0]}, {crop_bounds[1]}, {crop_bounds[2]}, {crop_bounds[3]}\n"
         )
-        summary_file.write("\nVideo analysis:\n")
-        summary_file.write(f"Video file: {args.video.name}\n")
+        summary_file.write("\nFeed analysis:\n")
+        summary_file.write(f"Camera source: {args.camera}\n")
         summary_file.write(f"Total frames processed: {total_frames}\n")
         summary_file.write(f"Frame pairs analyzed: {frame_pairs}\n")
         summary_file.write(f"Total vectors exported: {total_vectors}\n")
@@ -600,7 +604,7 @@ def main() -> None:
             summary_file.write("No numeric text detected.\n")
 
     print("Analysis complete.")
-    print(f"Video analyzed: {args.video}")
+    print(f"Camera source analyzed: {args.camera}")
     print(f"Cropped region saved to: {cropped_path}")
     print(f"Cropped mask saved to: {cropped_mask_path}")
     print(f"Dye mask saved to: {dye_mask_path}")

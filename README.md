@@ -25,20 +25,21 @@ If Tesseract is installed in a non-standard location, update the script by setti
 
 ## Usage
 
-Run the analysis from the repository root:
+Run the analysis from the repository root. By default the script connects to camera index `0`:
 
 ```bash
 python process_image.py
 ```
 
-To include a second frame for sparse optical flow, pass the `--second-image` flag (defaults to `screenshot2.png`):
+To use a specific virtual camera (for example `/dev/video2`), pass the `--camera` option:
 
 ```bash
-python process_image.py --second-image path/to/screenshot2.png
+python process_image.py --camera /dev/video2
 ```
 
 Key command line options:
 
+- `--camera`: Virtual camera identifier. Accepts an integer index or device path.
 - `--output`: Directory where results are stored (default: `outputs/`).
 - `--padding`: Extra pixels to add around the detected markers when cropping.
 - `--digits-width`, `--digits-height`: Ratios that control how much of the bottom-right corner is used for OCR. Increase them if the numbers are not fully captured.
@@ -52,7 +53,6 @@ All generated artifacts are written to the output directory:
 - `digits_region.png`: The bottom-right crop used for OCR.
 - `numeric_readings.csv`: CSV containing the recognized numbers, OCR confidence, and bounding boxes in the original image coordinates.
 - `summary.txt`: Text file summarizing the area statistics and OCR results.
-- `cropped_region_second.png`: Matched crop from the secondary image used for optical flow.
 - `cropped_region_mask.png`: Cropped dye mask corresponding to the marker region.
 - `sparse_flow_vectors.csv`: Sparse optical flow vectors stored as float32 values in `[x, y, delta_x, delta_y]` format.
 - `sparse_flow_visualization.png`: Reference crop overlaid with the sparse vector field arrows.
