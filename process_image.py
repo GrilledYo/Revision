@@ -284,6 +284,20 @@ def draw_sparse_flow(image: np.ndarray, flow: SparseFlowResult) -> np.ndarray:
     return overlay
 
 
+def append_new_field_marker(vectors: np.ndarray) -> np.ndarray:
+    """Attach a new-field marker column to a sparse flow array."""
+
+    if vectors.size == 0:
+        return np.empty((0, 5), dtype=np.float32)
+
+    if vectors.ndim != 2 or vectors.shape[1] < 4:
+        raise ValueError("Sparse flow vectors must have shape (N, 4).")
+
+    marker_column = np.zeros((vectors.shape[0], 1), dtype=np.float32)
+    marker_column[0, 0] = 1.0
+    return np.hstack((vectors.astype(np.float32, copy=False), marker_column))
+
+
 def save_sparse_flow_sequence_to_csv(flow_vectors: Iterable[np.ndarray], csv_path: Path) -> None:
     """Persist a sequence of sparse flow vectors to CSV with boundary markers."""
 
@@ -294,8 +308,17 @@ def save_sparse_flow_sequence_to_csv(flow_vectors: Iterable[np.ndarray], csv_pat
         for vectors in flow_vectors:
             if vectors.size == 0:
                 continue
-            for idx, (x, y, dx, dy) in enumerate(vectors):
-                marker = 1 if idx == 0 else 0
+
+            if vectors.ndim != 2 or vectors.shape[1] < 4:
+                continue
+
+            has_marker_column = vectors.shape[1] >= 5
+            for idx, row in enumerate(vectors):
+                x, y, dx, dy = (float(row[0]), float(row[1]), float(row[2]), float(row[3]))
+                if has_marker_column:
+                    marker = int(round(float(row[4])))
+                else:
+                    marker = 1 if idx == 0 else 0
                 writer.writerow(
                     [f"{x:.6f}", f"{y:.6f}", f"{dx:.6f}", f"{dy:.6f}", marker]
                 )
@@ -559,14 +582,15 @@ def main() -> None:
     total_vectors = 0
     flow_vis_path = output_dir / "sparse_flow_visualization.png"
     flow_overlay_saved = False
-    interval_exports: List[Path] = []
 
     flow_interval_records: List[Tuple[float, np.ndarray]] = []
+    interval_export_path: Optional[Path] = None
+    last_interval_bounds: Optional[Tuple[int, int]] = None
     current_interval_start = 0.0
     next_interval_time = FLOW_EXPORT_INTERVAL_SECONDS
 
     def flush_interval(end_time: float, *, final: bool = False) -> None:
-        nonlocal flow_interval_records, current_interval_start, next_interval_time
+        nonlocal flow_interval_records, current_interval_start, next_interval_time, interval_export_path, last_interval_bounds
         if not flow_interval_records:
             current_interval_start = end_time
             if not final:
@@ -582,10 +606,11 @@ def main() -> None:
 
         start_seconds = int(math.floor(current_interval_start))
         end_seconds = int(math.ceil(end_time))
-        interval_csv_name = f"sparse_flow_vectors_{start_seconds:04d}-{end_seconds:04d}s.csv"
+        interval_csv_name = "sparse_flow_vectors_interval.csv"
         interval_path = output_dir / interval_csv_name
         save_sparse_flow_sequence_to_csv(flush_vectors, interval_path)
-        interval_exports.append(interval_path)
+        interval_export_path = interval_path
+        last_interval_bounds = (start_seconds, end_seconds)
 
         flow_interval_records = [(ts, vectors) for ts, vectors in flow_interval_records if ts > end_time + epsilon]
         current_interval_start = end_time
@@ -600,11 +625,12 @@ def main() -> None:
             total_frames += 1
             current_crop = crop_with_bounds(frame, crop_bounds)
             flow_result = compute_sparse_vector_field(previous_crop, current_crop)
-            flow_vectors_sequence.append(flow_result.vectors)
+            vectors_with_marker = append_new_field_marker(flow_result.vectors)
+            flow_vectors_sequence.append(vectors_with_marker)
             frame_pairs += 1
             total_vectors += flow_result.vectors.shape[0]
             timestamp_seconds = frame_pairs / frame_rate
-            flow_interval_records.append((timestamp_seconds, flow_result.vectors))
+            flow_interval_records.append((timestamp_seconds, vectors_with_marker))
 
             while timestamp_seconds >= next_interval_time - 1e-9:
                 flush_interval(next_interval_time)
@@ -661,10 +687,15 @@ def main() -> None:
             "Vectors stored per frame pair with columns [x, y, delta_x, delta_y, new_field].\n"
         )
         summary_file.write(f"CSV export: {flow_csv_path.name}\n")
-        if interval_exports:
-            summary_file.write("Interval CSV exports (10s cadence):\n")
-            for path in interval_exports:
-                summary_file.write(f"- {path.name}\n")
+        if interval_export_path is not None:
+            summary_file.write("Interval CSV export (10s cadence):\n")
+            if last_interval_bounds is not None:
+                start, end = last_interval_bounds
+                summary_file.write(
+                    f"- {interval_export_path.name} (last window: {start:04d}-{end:04d}s)\n"
+                )
+            else:
+                summary_file.write(f"- {interval_export_path.name}\n")
         else:
             summary_file.write("No interval CSV exports generated.\n")
         if flow_overlay_saved:
@@ -688,10 +719,9 @@ def main() -> None:
     print(f"Dye mask saved to: {dye_mask_path}")
     print(f"Dye overlay saved to: {overlay_path}")
     print(f"Sparse flow CSV saved to: {flow_csv_path}")
-    if interval_exports:
-        print("Interval sparse flow CSV exports:")
-        for path in interval_exports:
-            print(f"  - {path}")
+    if interval_export_path is not None:
+        print("Interval sparse flow CSV export updated at:")
+        print(f"  - {interval_export_path}")
     if flow_overlay_saved:
         print(f"Sparse flow visualization saved to: {flow_vis_path}")
     else:
