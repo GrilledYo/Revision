@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple, Union
@@ -67,6 +68,10 @@ MARKER_CROSS_SIZE = 20  # Size of the cross marker drawn at detected marker cent
 MARKER_CROSS_THICKNESS = 2  # Line thickness of the cross marker overlay.
 MARKER_CIRCLE_RADIUS = 10  # Radius of the circle drawn around each detected marker.
 MARKER_CIRCLE_THICKNESS = 2  # Line thickness of the marker circle overlay.
+
+# Sparse flow export
+FLOW_EXPORT_INTERVAL_SECONDS = 10.0  # Cadence (in seconds of footage) for sparse flow CSV snapshots.
+FLOW_EXPORT_FPS_FALLBACK = 30.0  # Frame-rate value used when the capture source does not report one.
 
 
 @dataclass
@@ -501,6 +506,7 @@ def main() -> None:
 
     image: np.ndarray
     cap: Optional[cv2.VideoCapture] = None
+    frame_rate: float = FLOW_EXPORT_FPS_FALLBACK
 
     if args.image is not None:
         image = load_image(args.image)
@@ -516,6 +522,10 @@ def main() -> None:
             raise RuntimeError(
                 "Unable to open camera source {src}. If you intended to analyze a still image, pass it via --image.".format(src=args.camera)
             )
+
+        frame_rate = float(cap.get(cv2.CAP_PROP_FPS))
+        if not np.isfinite(frame_rate) or frame_rate <= 0:
+            frame_rate = FLOW_EXPORT_FPS_FALLBACK
 
         success, frame = cap.read()
         if not success or frame is None:
@@ -549,6 +559,38 @@ def main() -> None:
     total_vectors = 0
     flow_vis_path = output_dir / "sparse_flow_visualization.png"
     flow_overlay_saved = False
+    interval_exports: List[Path] = []
+
+    flow_interval_records: List[Tuple[float, np.ndarray]] = []
+    current_interval_start = 0.0
+    next_interval_time = FLOW_EXPORT_INTERVAL_SECONDS
+
+    def flush_interval(end_time: float, *, final: bool = False) -> None:
+        nonlocal flow_interval_records, current_interval_start, next_interval_time
+        if not flow_interval_records:
+            current_interval_start = end_time
+            if not final:
+                next_interval_time = current_interval_start + FLOW_EXPORT_INTERVAL_SECONDS
+            return
+
+        epsilon = 1e-9
+        flush_vectors = [vectors for ts, vectors in flow_interval_records if ts <= end_time + epsilon]
+        if not flush_vectors:
+            if not final:
+                next_interval_time = max(next_interval_time, end_time + FLOW_EXPORT_INTERVAL_SECONDS)
+            return
+
+        start_seconds = int(math.floor(current_interval_start))
+        end_seconds = int(math.ceil(end_time))
+        interval_csv_name = f"sparse_flow_vectors_{start_seconds:04d}-{end_seconds:04d}s.csv"
+        interval_path = output_dir / interval_csv_name
+        save_sparse_flow_sequence_to_csv(flush_vectors, interval_path)
+        interval_exports.append(interval_path)
+
+        flow_interval_records = [(ts, vectors) for ts, vectors in flow_interval_records if ts > end_time + epsilon]
+        current_interval_start = end_time
+        if not final:
+            next_interval_time = current_interval_start + FLOW_EXPORT_INTERVAL_SECONDS
 
     if cap is not None:
         while True:
@@ -561,6 +603,12 @@ def main() -> None:
             flow_vectors_sequence.append(flow_result.vectors)
             frame_pairs += 1
             total_vectors += flow_result.vectors.shape[0]
+            timestamp_seconds = frame_pairs / frame_rate
+            flow_interval_records.append((timestamp_seconds, flow_result.vectors))
+
+            while timestamp_seconds >= next_interval_time - 1e-9:
+                flush_interval(next_interval_time)
+
             if flow_result.vectors.size and not flow_overlay_saved:
                 flow_overlay = draw_sparse_flow(previous_crop, flow_result)
                 cv2.imwrite(str(flow_vis_path), flow_overlay)
@@ -568,6 +616,10 @@ def main() -> None:
             previous_crop = current_crop
 
         cap.release()
+
+        if frame_pairs and flow_interval_records:
+            final_timestamp = flow_interval_records[-1][0]
+            flush_interval(final_timestamp, final=True)
 
     flow_csv_path = output_dir / "sparse_flow_vectors.csv"
     save_sparse_flow_sequence_to_csv(flow_vectors_sequence, flow_csv_path)
@@ -609,6 +661,12 @@ def main() -> None:
             "Vectors stored per frame pair with columns [x, y, delta_x, delta_y, new_field].\n"
         )
         summary_file.write(f"CSV export: {flow_csv_path.name}\n")
+        if interval_exports:
+            summary_file.write("Interval CSV exports (10s cadence):\n")
+            for path in interval_exports:
+                summary_file.write(f"- {path.name}\n")
+        else:
+            summary_file.write("No interval CSV exports generated.\n")
         if flow_overlay_saved:
             summary_file.write(f"First visualization: {flow_vis_path.name}\n")
         else:
@@ -630,6 +688,10 @@ def main() -> None:
     print(f"Dye mask saved to: {dye_mask_path}")
     print(f"Dye overlay saved to: {overlay_path}")
     print(f"Sparse flow CSV saved to: {flow_csv_path}")
+    if interval_exports:
+        print("Interval sparse flow CSV exports:")
+        for path in interval_exports:
+            print(f"  - {path}")
     if flow_overlay_saved:
         print(f"Sparse flow visualization saved to: {flow_vis_path}")
     else:
