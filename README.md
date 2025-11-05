@@ -1,6 +1,6 @@
 # Dye Flow Image Analysis
 
-This repository contains a Python script that performs a computer-vision analysis of the provided dye-flow `screenshot.png`.
+This repository contains a Python script that performs a computer-vision analysis of dye-flow imagery sourced from an OBS video stream (or captured frames saved to disk).
 
 The script:
 
@@ -25,23 +25,22 @@ If Tesseract is installed in a non-standard location, update the script by setti
 
 ## Usage
 
-Run the analysis from the repository root:
+Run the analysis from the repository root, pointing the script at the OBS stream URL (such as an RTMP endpoint) or the virtual camera device that OBS exposes:
 
 ```bash
-python process_image.py
+python process_image.py --stream-url rtmp://127.0.0.1:1935/live/experiment
 ```
 
-To include a second frame for sparse optical flow, pass the `--second-image` flag (defaults to `screenshot2.png`):
-
-```bash
-python process_image.py --second-image path/to/screenshot2.png
-```
+If the stream is continuous, you can limit the processing time by specifying `--frame-limit` so that only the first *N* frames are consumed. The script retries fetching the initial frame up to 50 times with a 0.1 second delay; adjust this behaviour with `--connect-retries` and `--retry-delay` if OBS needs extra time to start broadcasting.
 
 Key command line options:
 
+- `--stream-url`: OBS stream URL or device identifier that OpenCV can open.
 - `--output`: Directory where results are stored (default: `outputs/`).
 - `--padding`: Extra pixels to add around the detected markers when cropping.
 - `--digits-width`, `--digits-height`: Ratios that control how much of the bottom-right corner is used for OCR. Increase them if the numbers are not fully captured.
+- `--frame-limit`: Maximum number of frames to read from the stream (0 means read until the stream ends).
+- `--connect-retries` / `--retry-delay`: Control how many times and how often the script retries reading the first frame.
 
 All generated artifacts are written to the output directory:
 
