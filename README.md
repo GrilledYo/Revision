@@ -31,6 +31,13 @@ Run the analysis from the repository root. By default the script connects to cam
 python process_image.py
 ```
 
+If you want to process a still image (for example the provided `screenshot.png`), pass the path with `--image` and the camera will
+be skipped entirely:
+
+```bash
+python process_image.py --image screenshot.png
+```
+
 To use a specific virtual camera (for example `/dev/video2`), pass the `--camera` option:
 
 ```bash
@@ -39,6 +46,7 @@ python process_image.py --camera /dev/video2
 
 Key command line options:
 
+- `--image`: Path to a single image file. When supplied, the script does not attempt to open a camera.
 - `--camera`: Virtual camera identifier. Accepts an integer index or device path.
 - `--output`: Directory where results are stored (default: `outputs/`).
 - `--padding`: Extra pixels to add around the detected markers when cropping.

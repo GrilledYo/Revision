@@ -455,6 +455,14 @@ def annotate_markers(image: np.ndarray, markers: Sequence[MarkerDetection]) -> n
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze dye flow feed with OpenCV.")
     parser.add_argument(
+        "--image",
+        type=Path,
+        help=(
+            "Path to a still image to analyze. When provided, the script will skip video capture "
+            "and process the supplied file instead."
+        ),
+    )
+    parser.add_argument(
         "--camera",
         default="0",
         help=(
@@ -491,22 +499,30 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    camera_source: Union[int, str]
-    if isinstance(args.camera, str) and args.camera.isdigit():
-        camera_source = int(args.camera)
+    image: np.ndarray
+    cap: Optional[cv2.VideoCapture] = None
+
+    if args.image is not None:
+        image = load_image(args.image)
     else:
-        camera_source = args.camera
+        camera_source: Union[int, str]
+        if isinstance(args.camera, str) and args.camera.isdigit():
+            camera_source = int(args.camera)
+        else:
+            camera_source = args.camera
 
-    cap = cv2.VideoCapture(camera_source)
-    if not cap.isOpened():
-        raise RuntimeError(f"Unable to open camera source {args.camera}")
+        cap = cv2.VideoCapture(camera_source)
+        if not cap.isOpened():
+            raise RuntimeError(
+                "Unable to open camera source {src}. If you intended to analyze a still image, pass it via --image.".format(src=args.camera)
+            )
 
-    success, frame = cap.read()
-    if not success or frame is None:
-        cap.release()
-        raise RuntimeError("Video file does not contain any frames.")
+        success, frame = cap.read()
+        if not success or frame is None:
+            cap.release()
+            raise RuntimeError("Video file does not contain any frames.")
 
-    image = frame
+        image = frame
     output_dir = args.output
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -534,23 +550,24 @@ def main() -> None:
     flow_vis_path = output_dir / "sparse_flow_visualization.png"
     flow_overlay_saved = False
 
-    while True:
-        success, frame = cap.read()
-        if not success or frame is None:
-            break
-        total_frames += 1
-        current_crop = crop_with_bounds(frame, crop_bounds)
-        flow_result = compute_sparse_vector_field(previous_crop, current_crop)
-        flow_vectors_sequence.append(flow_result.vectors)
-        frame_pairs += 1
-        total_vectors += flow_result.vectors.shape[0]
-        if flow_result.vectors.size and not flow_overlay_saved:
-            flow_overlay = draw_sparse_flow(previous_crop, flow_result)
-            cv2.imwrite(str(flow_vis_path), flow_overlay)
-            flow_overlay_saved = True
-        previous_crop = current_crop
+    if cap is not None:
+        while True:
+            success, frame = cap.read()
+            if not success or frame is None:
+                break
+            total_frames += 1
+            current_crop = crop_with_bounds(frame, crop_bounds)
+            flow_result = compute_sparse_vector_field(previous_crop, current_crop)
+            flow_vectors_sequence.append(flow_result.vectors)
+            frame_pairs += 1
+            total_vectors += flow_result.vectors.shape[0]
+            if flow_result.vectors.size and not flow_overlay_saved:
+                flow_overlay = draw_sparse_flow(previous_crop, flow_result)
+                cv2.imwrite(str(flow_vis_path), flow_overlay)
+                flow_overlay_saved = True
+            previous_crop = current_crop
 
-    cap.release()
+        cap.release()
 
     flow_csv_path = output_dir / "sparse_flow_vectors.csv"
     save_sparse_flow_sequence_to_csv(flow_vectors_sequence, flow_csv_path)
@@ -581,7 +598,10 @@ def main() -> None:
             f"{crop_bounds[0]}, {crop_bounds[1]}, {crop_bounds[2]}, {crop_bounds[3]}\n"
         )
         summary_file.write("\nFeed analysis:\n")
-        summary_file.write(f"Camera source: {args.camera}\n")
+        if args.image is not None:
+            summary_file.write(f"Image source: {args.image}\n")
+        else:
+            summary_file.write(f"Camera source: {args.camera}\n")
         summary_file.write(f"Total frames processed: {total_frames}\n")
         summary_file.write(f"Frame pairs analyzed: {frame_pairs}\n")
         summary_file.write(f"Total vectors exported: {total_vectors}\n")
