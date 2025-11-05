@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -455,11 +456,10 @@ def annotate_markers(image: np.ndarray, markers: Sequence[MarkerDetection]) -> n
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze dye flow video with OpenCV.")
     parser.add_argument(
-        "video",
-        type=Path,
-        nargs="?",
-        default=Path("input.mp4"),
-        help="Path to the input mp4 video containing the experiment.",
+        "--stream-url",
+        required=True,
+        dest="stream_url",
+        help="OBS stream URL or device identifier to open with OpenCV.",
     )
     parser.add_argument(
         "--output", type=Path, default=Path("outputs"), help="Directory where outputs will be saved."
@@ -484,25 +484,70 @@ def parse_args() -> argparse.Namespace:
         dest="digits_height",
         help="Height ratio for bottom-right digits region crop.",
     )
+    parser.add_argument(
+        "--frame-limit",
+        type=int,
+        default=0,
+        dest="frame_limit",
+        help="Maximum number of frames to process from the stream (0 means until the stream ends).",
+    )
+    parser.add_argument(
+        "--connect-retries",
+        type=int,
+        default=50,
+        dest="connect_retries",
+        help="Number of attempts to read an initial frame from the OBS stream before failing.",
+    )
+    parser.add_argument(
+        "--retry-delay",
+        type=float,
+        default=0.1,
+        dest="retry_delay",
+        help="Seconds to wait between attempts while trying to read the first frame from the stream.",
+    )
     return parser.parse_args()
+
+
+def open_stream(
+    stream_url: str,
+    retries: int,
+    retry_delay: float,
+) -> Tuple[cv2.VideoCapture, np.ndarray]:
+    """Open the configured stream and return the capture plus the first frame."""
+
+    cap = cv2.VideoCapture(stream_url)
+    if not cap.isOpened():
+        raise RuntimeError(f"Unable to open stream {stream_url!r}")
+
+    frame: Optional[np.ndarray] = None
+    attempt = 0
+    while attempt < max(retries, 1):
+        success, frame = cap.read()
+        if success and frame is not None and frame.size:
+            break
+        attempt += 1
+        time.sleep(max(retry_delay, 0.0))
+
+    if frame is None or not frame.size:
+        cap.release()
+        raise RuntimeError(
+            "Failed to retrieve an initial frame from the OBS stream. "
+            "Ensure OBS is broadcasting and the stream URL/device is correct."
+        )
+
+    return cap, frame
 
 
 def main() -> None:
     args = parse_args()
 
-    if not args.video.exists():
-        raise FileNotFoundError(f"Unable to find video at {args.video}")
+    cap, first_frame = open_stream(
+        stream_url=args.stream_url,
+        retries=args.connect_retries,
+        retry_delay=args.retry_delay,
+    )
 
-    cap = cv2.VideoCapture(str(args.video))
-    if not cap.isOpened():
-        raise RuntimeError(f"Unable to open video file {args.video}")
-
-    success, frame = cap.read()
-    if not success or frame is None:
-        cap.release()
-        raise RuntimeError("Video file does not contain any frames.")
-
-    image = frame
+    image = first_frame
     output_dir = args.output
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -546,6 +591,9 @@ def main() -> None:
             flow_overlay_saved = True
         previous_crop = current_crop
 
+        if args.frame_limit and total_frames >= args.frame_limit:
+            break
+
     cap.release()
 
     flow_csv_path = output_dir / "sparse_flow_vectors.csv"
@@ -576,8 +624,8 @@ def main() -> None:
         summary_file.write(
             f"{crop_bounds[0]}, {crop_bounds[1]}, {crop_bounds[2]}, {crop_bounds[3]}\n"
         )
-        summary_file.write("\nVideo analysis:\n")
-        summary_file.write(f"Video file: {args.video.name}\n")
+        summary_file.write("\nStream analysis:\n")
+        summary_file.write(f"Stream source: {args.stream_url}\n")
         summary_file.write(f"Total frames processed: {total_frames}\n")
         summary_file.write(f"Frame pairs analyzed: {frame_pairs}\n")
         summary_file.write(f"Total vectors exported: {total_vectors}\n")
@@ -600,7 +648,7 @@ def main() -> None:
             summary_file.write("No numeric text detected.\n")
 
     print("Analysis complete.")
-    print(f"Video analyzed: {args.video}")
+    print(f"Stream analyzed: {args.stream_url}")
     print(f"Cropped region saved to: {cropped_path}")
     print(f"Cropped mask saved to: {cropped_mask_path}")
     print(f"Dye mask saved to: {dye_mask_path}")
