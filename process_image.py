@@ -513,6 +513,9 @@ def main() -> None:
     overlay = overlay_mask(image, dye_area.mask)
     cv2.imwrite(str(overlay_path), overlay)
 
+    cropped_masks_dir = output_dir / "cropped_masks"
+    cropped_masks_dir.mkdir(parents=True, exist_ok=True)
+
     markers = detect_red_markers(image)
     cropped_color, crop_bounds = crop_between_markers(image, markers, padding=args.padding)
     cropped_mask, _ = crop_between_markers(image, markers, padding=args.padding, source=dye_area.mask)
@@ -522,6 +525,10 @@ def main() -> None:
     cv2.imwrite(str(cropped_path), cropped_color)
     cropped_mask_path = output_dir / "cropped_region_mask.png"
     cv2.imwrite(str(cropped_mask_path), cropped_mask)
+
+    frame_index = 0
+    first_mask_path = cropped_masks_dir / f"frame{frame_index:04d}_mask.png"
+    cv2.imwrite(str(first_mask_path), cropped_mask)
 
     flow_vectors_sequence: List[np.ndarray] = []
     total_frames = 1
@@ -535,7 +542,12 @@ def main() -> None:
         if not success or frame is None:
             break
         total_frames += 1
+        frame_index += 1
         current_crop = crop_with_bounds(frame, crop_bounds)
+        frame_dye_mask = compute_dye_area(frame).mask
+        current_cropped_mask = crop_with_bounds(frame_dye_mask, crop_bounds)
+        mask_path = cropped_masks_dir / f"frame{frame_index:04d}_mask.png"
+        cv2.imwrite(str(mask_path), current_cropped_mask)
         flow_result = compute_sparse_vector_field(previous_crop, current_crop)
         flow_vectors_sequence.append(flow_result.vectors)
         frame_pairs += 1
@@ -585,6 +597,7 @@ def main() -> None:
             "Vectors stored per frame pair with columns [x, y, delta_x, delta_y, new_field].\n"
         )
         summary_file.write(f"CSV export: {flow_csv_path.name}\n")
+        summary_file.write(f"Cropped mask directory: {cropped_masks_dir.name}\n")
         if flow_overlay_saved:
             summary_file.write(f"First visualization: {flow_vis_path.name}\n")
         else:
@@ -603,6 +616,7 @@ def main() -> None:
     print(f"Video analyzed: {args.video}")
     print(f"Cropped region saved to: {cropped_path}")
     print(f"Cropped mask saved to: {cropped_mask_path}")
+    print(f"Per-frame cropped masks directory: {cropped_masks_dir}")
     print(f"Dye mask saved to: {dye_mask_path}")
     print(f"Dye overlay saved to: {overlay_path}")
     print(f"Sparse flow CSV saved to: {flow_csv_path}")
