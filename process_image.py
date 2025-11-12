@@ -22,7 +22,7 @@ import pytesseract
 # ---------------------------------------------------------------------------
 
 # Marker detection
-MARKER_MIN_AREA = 30.0  # Smallest contour area (in pixels) considered a valid red marker.
+MARKER_MIN_AREA = 80  # Smallest contour area (in pixels) considered a valid red marker.
 RED_HSV_RANGE_1 = (np.array([0, 100, 80], dtype=np.uint8), np.array([10, 255, 255], dtype=np.uint8))
 # HSV lower/upper bounds capturing the lower portion of the red spectrum.
 RED_HSV_RANGE_2 = (np.array([160, 100, 80], dtype=np.uint8), np.array([179, 255, 255], dtype=np.uint8))
@@ -36,28 +36,28 @@ CLAHE_CLIP_LIMIT = 2.5  # Clip limit for CLAHE; higher values increase local con
 CLAHE_TILE_GRID_SIZE = (8, 8)  # Grid size for CLAHE; smaller grids adapt more locally to contrast changes.
 
 # Cropping
-DEFAULT_CROP_PADDING =-20  # Extra pixels included around detected markers when cropping the region of interest.
+DEFAULT_CROP_PADDING =-145  # Extra pixels included around detected markers when cropping the region of interest.
 
 # Dye area segmentation
 GAUSSIAN_BLUR_KERNEL = (5, 5)  # Kernel size for smoothing the saturation channel before thresholding.
-DYE_MASK_KERNEL_SIZE = (5, 5)  # Elliptical kernel size for morphological cleanup of the dye mask.
+DYE_MASK_KERNEL_SIZE = (20, 20)  # Elliptical kernel size for morphological cleanup of the dye mask.
 DYE_MASK_OPEN_ITERATIONS = 1  # Number of opening steps to remove isolated pixels in the dye mask.
 DYE_MASK_CLOSE_ITERATIONS = 2  # Number of closing steps to fill small gaps in the dye mask.
 
 # Digits region extraction
-DEFAULT_DIGITS_WIDTH_RATIO = 0.25  # Horizontal proportion of the image captured for the bottom-right digits crop.
-DEFAULT_DIGITS_HEIGHT_RATIO = 0.15  # Vertical proportion of the image captured for the bottom-right digits crop.
+DEFAULT_DIGITS_WIDTH_RATIO = 0.22  # Horizontal proportion of the image captured for the bottom-right digits crop.
+DEFAULT_DIGITS_HEIGHT_RATIO = 0.22  # Vertical proportion of the image captured for the bottom-right digits crop.
 
 # Digit preprocessing
 DIGIT_CLAHE_CLIP_LIMIT = 1 # CLAHE clip limit for digit preprocessing to sharpen contrast.
 DIGIT_CLAHE_TILE_GRID_SIZE = (2, 2)  # CLAHE tile grid size for digit preprocessing.
-DIGIT_SCALE_FACTOR = 2  # Upscaling factor applied before thresholding to improve OCR accuracy.
-DIGIT_THRESH_KERNEL_SIZE = (1, 1)  # Kernel size for morphological closing on the digit mask.
+DIGIT_SCALE_FACTOR = 3  # Upscaling factor applied before thresholding to improve OCR accuracy.
+DIGIT_THRESH_KERNEL_SIZE = (4, 4)  # Kernel size for morphological closing on the digit mask.
 DIGIT_MEDIAN_BLUR_SIZE = 1  # Median blur aperture size for removing salt-and-pepper noise after thresholding.
 DIGIT_BORDER_PADDING = 10  # Extra white border (in pixels) added around the processed digit crop before OCR.
 
 # OCR
-TESSERACT_CONFIG = "--psm 7 --oem 3 -c tessedit_char_whitelist=0123456789."  # OCR engine configuration string.
+TESSERACT_CONFIG = "--psm 7 --oem 1 -c tessedit_char_whitelist=0123456789."  # OCR engine configuration string.
 
 # Visualization
 OVERLAY_COLOR = (0, 0, 255)  # BGR color for overlaying the dye mask on the original image.
@@ -176,10 +176,10 @@ def crop_between_markers(
         raise RuntimeError("Could not determine region enclosed by red markers.")
 
     x, y, w, h = cv2.boundingRect(nonzero)
-    x_min = max(x - padding, 0)
-    y_min = max(y - padding, 0)
-    x_max = min(x + w + padding, image.shape[1])
-    y_max = min(y + h + padding, image.shape[0])
+    x_min = max(x - padding -50, 0)
+    y_min = max(y - padding + 115, 0)
+    x_max = min(x + w + padding + 50, image.shape[1])
+    y_max = min(y + h + padding - 145, image.shape[0])
 
     if source is None:
         source = image
@@ -298,9 +298,9 @@ def save_sparse_flow_sequence_to_csv(flow_vectors: Iterable[np.ndarray], csv_pat
 
 def compute_dye_area(image: np.ndarray) -> DyeAreaResult:
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    saturation = hsv[:, :, 1]
+    saturation = hsv[:, :, 0]
     blurred = cv2.GaussianBlur(saturation, GAUSSIAN_BLUR_KERNEL, 0)
-    _, sat_mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _, sat_mask = cv2.threshold(blurred, 165, 255, cv2.THRESH_BINARY)
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, DYE_MASK_KERNEL_SIZE)
     cleaned = cv2.morphologyEx(sat_mask, cv2.MORPH_OPEN, kernel, iterations=DYE_MASK_OPEN_ITERATIONS)
@@ -340,7 +340,7 @@ def preprocess_digits_region(
         interpolation=cv2.INTER_CUBIC,
     )
 
-    _, thresh = cv2.threshold(scaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    thresh = cv2.adaptiveThreshold(scaled, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)#cv2.threshold(scaled, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, DIGIT_THRESH_KERNEL_SIZE)
     cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
     cleaned = cv2.medianBlur(cleaned, DIGIT_MEDIAN_BLUR_SIZE)
@@ -525,6 +525,16 @@ def main() -> None:
     cv2.imwrite(str(cropped_path), cropped_color)
     cropped_mask_path = output_dir / "cropped_region_mask.png"
     cv2.imwrite(str(cropped_mask_path), cropped_mask)
+    
+    #digits_region, origin = prepare_digits_region(image, width_ratio=args.digits_width, height_ratio=args.digits_height)
+    #digits_region_path = output_dir / "digits_region.png"
+    #cv2.imwrite(str(digits_region_path), digits_region)
+
+    #digit_detections, processed_digits = run_ocr_on_region(digits_region)
+    #processed_digits_path = output_dir / "digits_region_processed.png"
+    #cv2.imwrite(str(processed_digits_path), processed_digits)
+    #csv_path = output_dir / "numeric_readings.csv"
+    #save_digits_to_csv(digit_detections, csv_path, origin)
 
     frame_index = 0
     first_mask_path = cropped_masks_dir / f"frame{frame_index:04d}_mask.png"
@@ -543,20 +553,20 @@ def main() -> None:
             break
         total_frames += 1
         frame_index += 1
-        current_crop = crop_with_bounds(frame, crop_bounds)
-        frame_dye_mask = compute_dye_area(frame).mask
-        current_cropped_mask = crop_with_bounds(frame_dye_mask, crop_bounds)
-        mask_path = cropped_masks_dir / f"frame{frame_index:04d}_mask.png"
-        cv2.imwrite(str(mask_path), current_cropped_mask)
-        flow_result = compute_sparse_vector_field(previous_crop, current_crop)
-        flow_vectors_sequence.append(flow_result.vectors)
-        frame_pairs += 1
-        total_vectors += flow_result.vectors.shape[0]
-        if flow_result.vectors.size and not flow_overlay_saved:
-            flow_overlay = draw_sparse_flow(previous_crop, flow_result)
-            cv2.imwrite(str(flow_vis_path), flow_overlay)
-            flow_overlay_saved = True
-        previous_crop = current_crop
+        #current_crop = crop_with_bounds(frame, crop_bounds)
+        #frame_dye_mask = compute_dye_area(frame).mask
+        #current_cropped_mask = crop_with_bounds(frame_dye_mask, crop_bounds)
+        #mask_path = cropped_masks_dir / f"frame{frame_index:04d}_mask.png"
+        #cv2.imwrite(str(mask_path), current_cropped_mask)
+        #flow_result = compute_sparse_vector_field(previous_crop, current_crop)
+        #flow_vectors_sequence.append(flow_result.vectors)
+        #frame_pairs += 1
+        #total_vectors += flow_result.vectors.shape[0]
+        #if flow_result.vectors.size and not flow_overlay_saved:
+        #    flow_overlay = draw_sparse_flow(previous_crop, flow_result)
+        #    cv2.imwrite(str(flow_vis_path), flow_overlay)
+        #    flow_overlay_saved = True
+        #previous_crop = current_crop
 
     cap.release()
 
@@ -567,15 +577,15 @@ def main() -> None:
     markers_path = output_dir / "marker_detection.png"
     cv2.imwrite(str(markers_path), annotated_markers)
 
-    digits_region, origin = prepare_digits_region(image, width_ratio=args.digits_width, height_ratio=args.digits_height)
-    digits_region_path = output_dir / "digits_region.png"
-    cv2.imwrite(str(digits_region_path), digits_region)
+    #digits_region, origin = prepare_digits_region(image, width_ratio=args.digits_width, height_ratio=args.digits_height)
+    #digits_region_path = output_dir / "digits_region.png"
+    #cv2.imwrite(str(digits_region_path), digits_region)
 
-    digit_detections, processed_digits = run_ocr_on_region(digits_region)
-    processed_digits_path = output_dir / "digits_region_processed.png"
-    cv2.imwrite(str(processed_digits_path), processed_digits)
-    csv_path = output_dir / "numeric_readings.csv"
-    save_digits_to_csv(digit_detections, csv_path, origin)
+    #digit_detections, processed_digits = run_ocr_on_region(digits_region)
+    #processed_digits_path = output_dir / "digits_region_processed.png"
+    #cv2.imwrite(str(processed_digits_path), processed_digits)
+    #csv_path = output_dir / "numeric_readings.csv"
+    #save_digits_to_csv(digit_detections, csv_path, origin)
 
     summary_path = output_dir / "summary.txt"
     with summary_path.open("w", encoding="utf-8") as summary_file:
@@ -603,14 +613,14 @@ def main() -> None:
         else:
             summary_file.write("No sparse flow visualization generated (no vectors detected).\n")
         summary_file.write("\nNumeric detections:\n")
-        if digit_detections:
-            for det in digit_detections:
-                x, y, w, h = det.bbox
-                summary_file.write(
-                    f"text={det.text} confidence={det.confidence:.2f} bbox={(x + origin[0], y + origin[1], w, h)}\n"
-                )
-        else:
-            summary_file.write("No numeric text detected.\n")
+        #if digit_detections:
+        #    for det in digit_detections:
+        #        x, y, w, h = det.bbox
+        #        summary_file.write(
+        #            f"text={det.text} confidence={det.confidence:.2f} bbox={(x + origin[0], y + origin[1], w, h)}\n"
+        #        )
+        #else:
+        #    summary_file.write("No numeric text detected.\n")
 
     print("Analysis complete.")
     print(f"Video analyzed: {args.video}")
@@ -624,9 +634,9 @@ def main() -> None:
         print(f"Sparse flow visualization saved to: {flow_vis_path}")
     else:
         print("No sparse flow visualization generated (no vectors detected).")
-    print(f"Digits region saved to: {digits_region_path}")
-    print(f"Processed digits preview saved to: {processed_digits_path}")
-    print(f"Numeric readings CSV saved to: {csv_path}")
+    #print(f"Digits region saved to: {digits_region_path}")
+    #print(f"Processed digits preview saved to: {processed_digits_path}")
+    #print(f"Numeric readings CSV saved to: {csv_path}")
     print(f"Summary saved to: {summary_path}")
 
 
