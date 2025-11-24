@@ -50,8 +50,8 @@ DEFAULT_DIGITS_HEIGHT_RATIO = 0.22  # Vertical proportion of the image captured 
 
 # Digit preprocessing
 DIGIT_CLAHE_CLIP_LIMIT = 1 # CLAHE clip limit for digit preprocessing to sharpen contrast.
-DIGIT_CLAHE_TILE_GRID_SIZE = (2, 2)  # CLAHE tile grid size for digit preprocessing.
-DIGIT_SCALE_FACTOR = 3  # Upscaling factor applied before thresholding to improve OCR accuracy.
+DIGIT_CLAHE_TILE_GRID_SIZE = (4, 4)  # CLAHE tile grid size for digit preprocessing.
+DIGIT_SCALE_FACTOR = 5  # Upscaling factor applied before thresholding to improve OCR accuracy.
 DIGIT_THRESH_KERNEL_SIZE = (4, 4)  # Kernel size for morphological closing on the digit mask.
 DIGIT_MEDIAN_BLUR_SIZE = 1  # Median blur aperture size for removing salt-and-pepper noise after thresholding.
 DIGIT_BORDER_PADDING = 10  # Extra white border (in pixels) added around the processed digit crop before OCR.
@@ -334,7 +334,7 @@ def preprocess_digits_region(
     clahe = cv2.createCLAHE(clipLimit=DIGIT_CLAHE_CLIP_LIMIT, tileGridSize=DIGIT_CLAHE_TILE_GRID_SIZE)
     enhanced = clahe.apply(gray)
 
-    cleaned = cv2.resize(
+    scaled = cv2.resize(
         enhanced,
         dsize=None,
         fx=scale_factor,
@@ -342,10 +342,10 @@ def preprocess_digits_region(
         interpolation=cv2.INTER_CUBIC,
     )
 
-    # thresh = cv2.adaptiveThreshold(scaled, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)#cv2.threshold(scaled, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    # kernel = cv2.getStructuringElement(cv2.MORPH_RECT, DIGIT_THRESH_KERNEL_SIZE)
-    # cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
-    # cleaned = cv2.medianBlur(cleaned, DIGIT_MEDIAN_BLUR_SIZE)
+    thresh = cv2.adaptiveThreshold(scaled, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 511, 1)#cv2.threshold(scaled, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, DIGIT_THRESH_KERNEL_SIZE)
+    cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
+    cleaned = cv2.medianBlur(cleaned, DIGIT_MEDIAN_BLUR_SIZE)
 
     scale_x = cleaned.shape[1] / max(region.shape[1], 1)
     scale_y = cleaned.shape[0] / max(region.shape[0], 1)
@@ -453,6 +453,45 @@ def annotate_markers(image: np.ndarray, markers: Sequence[MarkerDetection]) -> n
         )
     return annotated
 
+def join_digit_detections(detections: Sequence[OcrDetection]) -> str:
+    """Concatenate OCR detections from left to right into a single string."""
+
+    if not detections:
+        return ""
+    ordered = sorted(detections, key=lambda d: d.bbox[0])
+    return "".join(det.text for det in ordered)
+
+
+def parse_velocity_from_digits(digits_text: str, scale: float) -> Optional[float]:
+    """Parse a numeric velocity from the OCR digits and apply the requested scale."""
+
+    if not digits_text:
+        return None
+    try:
+        value = float(digits_text)
+    except ValueError:
+        return None
+    return value * scale
+
+
+def compute_reynolds_number(
+    velocity: Optional[float], length: float, kinematic_viscosity: float
+) -> Optional[float]:
+    """Calculate the Reynolds number for the provided velocity.
+
+    Returns ``None`` when the velocity is missing or when the viscosity would
+    cause a division by zero.
+    """
+
+    if velocity is None or kinematic_viscosity == 0:
+        return None
+    return velocity * length / kinematic_viscosity
+
+
+def format_optional_float(value: Optional[float]) -> str:
+    """Convert an optional float to a CSV-friendly string."""
+
+    return "" if value is None else f"{value:.6f}"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze dye flow video with OpenCV.")
@@ -486,164 +525,268 @@ def parse_args() -> argparse.Namespace:
         dest="digits_height",
         help="Height ratio for bottom-right digits region crop.",
     )
+    parser.add_argument(
+        "--velocity-scale",
+        type=float,
+        default=1/(60000*np.pi*0.25*(1.5*0.0254)**2),
+        help="Scale factor applied to the OCR digits to obtain flow velocity.",
+    )
+    parser.add_argument(
+        "--characteristic-length",
+        type=float,
+        default=1.5*0.0254,
+        help="Characteristic length (in meters) used for Reynolds number computation.",
+    )
+    parser.add_argument(
+        "--kinematic-viscosity",
+        type=float,
+        default=1e-6,
+        help="Kinematic viscosity (in m^2/s) used for Reynolds number computation.",
+)
     return parser.parse_args()
 
 
 def main() -> None:
-    args = parse_args()
-
-    if not args.video.exists():
-        raise FileNotFoundError(f"Unable to find video at {args.video}")
-
-    cap = cv2.VideoCapture(str(args.video))
-    if not cap.isOpened():
-        raise RuntimeError(f"Unable to open video file {args.video}")
-
-    success, frame = cap.read()
-    if not success or frame is None:
-        cap.release()
-        raise RuntimeError("Video file does not contain any frames.")
-
-    image = frame
-    output_dir = args.output
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    dye_area = compute_dye_area(image)
-    dye_mask_path = output_dir / "dye_mask.png"
-    cv2.imwrite(str(dye_mask_path), dye_area.mask)
-    overlay_path = output_dir / "dye_overlay.png"
-    overlay = overlay_mask(image, dye_area.mask)
-    cv2.imwrite(str(overlay_path), overlay)
-
-    cropped_masks_dir = output_dir / "cropped_masks"
-    cropped_masks_dir.mkdir(parents=True, exist_ok=True)
-
-    markers = detect_red_markers(image)
-    cropped_color, crop_bounds = crop_between_markers(image, markers, padding=args.padding)
-    cropped_mask, _ = crop_between_markers(image, markers, padding=args.padding, source=dye_area.mask)
-    previous_crop = cropped_color
-
-    cropped_path = output_dir / "cropped_region.png"
-    cv2.imwrite(str(cropped_path), cropped_color)
-    cropped_mask_path = output_dir / "cropped_region_mask.png"
-    cv2.imwrite(str(cropped_mask_path), cropped_mask)
+    try:
+        args = parse_args()
     
-    # digits_region, origin = prepare_digits_region(image, width_ratio=args.digits_width, height_ratio=args.digits_height)
-    # digits_region_path = output_dir / "digits_region.png"
-    # cv2.imwrite(str(digits_region_path), digits_region)
-
-    # digit_detections, processed_digits = run_ocr_on_region(digits_region)
-    # processed_digits_path = output_dir / "digits_region_processed.png"
-    # cv2.imwrite(str(processed_digits_path), processed_digits)
-    # csv_path = output_dir / "numeric_readings.csv"
-    # save_digits_to_csv(digit_detections, csv_path, origin)
-
-    frame_index = 0
-    first_mask_path = cropped_masks_dir / f"frame{frame_index:04d}_mask.png"
-    cv2.imwrite(str(first_mask_path), cropped_mask)
-
-    flow_vectors_sequence: List[np.ndarray] = []
-    total_frames = 1
-    frame_pairs = 0
-    total_vectors = 0
-    flow_vis_path = output_dir / "sparse_flow_visualization.png"
-    flow_overlay_saved = False
-
-    while True:
+        if not args.video.exists():
+            raise FileNotFoundError(f"Unable to find video at {args.video}")
+    
+        cap = cv2.VideoCapture(str(args.video))
+        if not cap.isOpened():
+            raise RuntimeError(f"Unable to open video file {args.video}")
+    
         success, frame = cap.read()
         if not success or frame is None:
-            break
-        total_frames += 1
-        frame_index += 1
-        current_crop = crop_with_bounds(frame, crop_bounds)
-        frame_dye_mask = compute_dye_area(frame).mask
-        current_cropped_mask = crop_with_bounds(frame_dye_mask, crop_bounds)
-        mask_path = cropped_masks_dir / f"frame{frame_index:04d}_mask.png"
-        cv2.imwrite(str(mask_path), current_cropped_mask)
-        flow_result = compute_sparse_vector_field(previous_crop, current_crop)
-        flow_vectors_sequence.append(flow_result.vectors)
-        frame_pairs += 1
-        total_vectors += flow_result.vectors.shape[0]
-        if flow_result.vectors.size and not flow_overlay_saved:
-           flow_overlay = draw_sparse_flow(previous_crop, flow_result)
-           cv2.imwrite(str(flow_vis_path), flow_overlay)
-           flow_overlay_saved = True
-        previous_crop = current_crop
-
-
-    cap.release()
-
-
-
-    flow_csv_path = output_dir / "sparse_flow_vectors.csv"
-    save_sparse_flow_sequence_to_csv(flow_vectors_sequence, flow_csv_path)
-
-    annotated_markers = annotate_markers(image, markers)
-    markers_path = output_dir / "marker_detection.png"
-    cv2.imwrite(str(markers_path), annotated_markers)
-
-    #digits_region, origin = prepare_digits_region(image, width_ratio=args.digits_width, height_ratio=args.digits_height)
-    #digits_region_path = output_dir / "digits_region.png"
-    #cv2.imwrite(str(digits_region_path), digits_region)
-
-    #digit_detections, processed_digits = run_ocr_on_region(digits_region)
-    #processed_digits_path = output_dir / "digits_region_processed.png"
-    #cv2.imwrite(str(processed_digits_path), processed_digits)
-    #csv_path = output_dir / "numeric_readings.csv"
-    #save_digits_to_csv(digit_detections, csv_path, origin)
-
-    summary_path = output_dir / "summary.txt"
-    with summary_path.open("w", encoding="utf-8") as summary_file:
-        summary_file.write("Dye area analysis\n")
-        summary_file.write(f"Total pixels: {image.shape[0] * image.shape[1]}\n")
-        summary_file.write(f"Dye pixel count: {dye_area.pixel_area}\n")
-        summary_file.write(f"Dye area ratio: {dye_area.area_ratio:.4f}\n")
-        summary_file.write("\n")
-        summary_file.write("Crop bounds (x_min, y_min, x_max, y_max):\n")
-        summary_file.write(
-            f"{crop_bounds[0]}, {crop_bounds[1]}, {crop_bounds[2]}, {crop_bounds[3]}\n"
+            cap.release()
+            raise RuntimeError("Video file does not contain any frames.")
+    
+        image = frame
+        output_dir = args.output
+        output_dir.mkdir(parents=True, exist_ok=True)
+    
+        dye_area = compute_dye_area(image)
+        dye_mask_path = output_dir / "dye_mask.png"
+        cv2.imwrite(str(dye_mask_path), dye_area.mask)
+        overlay_path = output_dir / "dye_overlay.png"
+        overlay = overlay_mask(image, dye_area.mask)
+        cv2.imwrite(str(overlay_path), overlay)
+    
+        cropped_masks_dir = output_dir / "cropped_masks"
+        cropped_masks_dir.mkdir(parents=True, exist_ok=True)
+    
+        markers = detect_red_markers(image)
+        cropped_color, crop_bounds = crop_between_markers(image, markers, padding=args.padding)
+        cropped_mask, _ = crop_between_markers(image, markers, padding=args.padding, source=dye_area.mask)
+        previous_crop = cropped_color
+    
+        cropped_path = output_dir / "cropped_region.png"
+        cv2.imwrite(str(cropped_path), cropped_color)
+        cropped_mask_path = output_dir / "cropped_region_mask.png"
+        cv2.imwrite(str(cropped_mask_path), cropped_mask)
+        
+        # digits_region, origin = prepare_digits_region(image, width_ratio=args.digits_width, height_ratio=args.digits_height)
+        # digits_region_path = output_dir / "digits_region.png"
+        # cv2.imwrite(str(digits_region_path), digits_region)
+    
+        # digit_detections, processed_digits = run_ocr_on_region(digits_region)
+        # processed_digits_path = output_dir / "digits_region_processed.png"
+        # cv2.imwrite(str(processed_digits_path), processed_digits)
+        # csv_path = output_dir / "numeric_readings.csv"
+        # save_digits_to_csv(digit_detections, csv_path, origin)
+    
+        digits_dir = output_dir / "digits_regions"
+        digits_dir.mkdir(parents=True, exist_ok=True)
+    
+        processed_digits_dir = output_dir / "digits_regions_processed"
+        processed_digits_dir.mkdir(parents=True, exist_ok=True)
+    
+        digits_csv_path = output_dir / "frame_metrics.csv"
+        digits_rows = []
+    
+        frame_index = 0
+        digits_region, _ = prepare_digits_region(
+            image, width_ratio=args.digits_width, height_ratio=args.digits_height
         )
-        summary_file.write("\nVideo analysis:\n")
-        summary_file.write(f"Video file: {args.video.name}\n")
-        summary_file.write(f"Total frames processed: {total_frames}\n")
-        summary_file.write(f"Frame pairs analyzed: {frame_pairs}\n")
-        summary_file.write(f"Total vectors exported: {total_vectors}\n")
-        summary_file.write(
-            "Vectors stored per frame pair with columns [x, y, delta_x, delta_y, new_field].\n"
+        digit_detections, processed_digits = run_ocr_on_region(digits_region)
+        digits_path = digits_dir / f"frame{frame_index:04d}_digits.png"
+        processed_digits_path = processed_digits_dir / f"frame{frame_index:04d}_digits_processed.png"
+        cv2.imwrite(str(digits_path), digits_region)
+        cv2.imwrite(str(processed_digits_path), processed_digits)
+        digits_text = join_digit_detections(digit_detections)
+        velocity = parse_velocity_from_digits(digits_text, args.velocity_scale)
+        reynolds_number = compute_reynolds_number(
+            velocity, args.characteristic_length, args.kinematic_viscosity
         )
-        summary_file.write(f"CSV export: {flow_csv_path.name}\n")
-        summary_file.write(f"Cropped mask directory: {cropped_masks_dir.name}\n")
+        digits_rows.append(
+            {
+                "frame_index": frame_index,
+                "digits": digits_text,
+                "velocity": velocity,
+                "reynolds_number": reynolds_number,
+            }
+        )
+        first_mask_path = cropped_masks_dir / f"frame{frame_index:04d}_mask.png"
+        cv2.imwrite(str(first_mask_path), cropped_mask)
+    
+        flow_vectors_sequence: List[np.ndarray] = []
+        total_frames = 1
+        frame_pairs = 0
+        total_vectors = 0
+        flow_vis_path = output_dir / "sparse_flow_visualization.png"
+        flow_overlay_saved = False
+    
+        while True:
+            success, frame = cap.read()
+            if not success or frame is None:
+                break
+            total_frames += 1
+            frame_index += 1
+            #current_crop = crop_with_bounds(frame, crop_bounds)
+            frame_dye_mask = compute_dye_area(frame).mask
+            current_cropped_mask = crop_with_bounds(frame_dye_mask, crop_bounds)
+            mask_path = cropped_masks_dir / f"frame{frame_index:04d}_mask.png"
+            cv2.imwrite(str(mask_path), current_cropped_mask)
+            digits_region, _ = prepare_digits_region(
+                frame, width_ratio=args.digits_width, height_ratio=args.digits_height
+            )
+            digit_detections, processed_digits = run_ocr_on_region(digits_region)
+            #digits_path = digits_dir / f"frame{frame_index:04d}_digits.png"
+            processed_digits_path = processed_digits_dir / f"frame{frame_index:04d}_digits_processed.png"
+            #cv2.imwrite(str(digits_path), digits_region)
+            cv2.imwrite(str(processed_digits_path), processed_digits)
+            digits_text = join_digit_detections(digit_detections)
+            velocity = parse_velocity_from_digits(digits_text, args.velocity_scale)
+            reynolds_number = compute_reynolds_number(
+                velocity, args.characteristic_length, args.kinematic_viscosity
+            )
+            digits_rows.append(
+                {
+                    "frame_index": frame_index,
+                    "digits": digits_text,
+                    "velocity": velocity,
+                    "reynolds_number": reynolds_number,
+                }
+            )
+            #flow_result = compute_sparse_vector_field(previous_crop, current_crop)
+            #flow_vectors_sequence.append(flow_result.vectors)
+            frame_pairs += 1
+            #total_vectors += flow_result.vectors.shape[0]
+            #if flow_result.vectors.size and not flow_overlay_saved:
+            #   flow_overlay = draw_sparse_flow(previous_crop, flow_result)
+            #   cv2.imwrite(str(flow_vis_path), flow_overlay)
+            #   flow_overlay_saved = True
+            #previous_crop = current_crop
+    
+    
+        cap.release()
+    
+    
+    
+        flow_csv_path = output_dir / "sparse_flow_vectors.csv"
+        save_sparse_flow_sequence_to_csv(flow_vectors_sequence, flow_csv_path)
+        
+        with digits_csv_path.open("w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(
+                csvfile,
+                fieldnames=["frame_index", "digits", "velocity", "reynolds_number"],
+            )
+            writer.writeheader()
+            for row in digits_rows:
+                writer.writerow(
+                    {
+                        "frame_index": row["frame_index"],
+                        "digits": row["digits"],
+                        "velocity": format_optional_float(row["velocity"]),
+                        "reynolds_number": format_optional_float(row["reynolds_number"]),
+                    }
+                )
+    
+        annotated_markers = annotate_markers(image, markers)
+        markers_path = output_dir / "marker_detection.png"
+        cv2.imwrite(str(markers_path), annotated_markers)
+    
+        #digits_region, origin = prepare_digits_region(image, width_ratio=args.digits_width, height_ratio=args.digits_height)
+        #digits_region_path = output_dir / "digits_region.png"
+        #cv2.imwrite(str(digits_region_path), digits_region)
+    
+        #digit_detections, processed_digits = run_ocr_on_region(digits_region)
+        #processed_digits_path = output_dir / "digits_region_processed.png"
+        #cv2.imwrite(str(processed_digits_path), processed_digits)
+        #csv_path = output_dir / "numeric_readings.csv"
+        #save_digits_to_csv(digit_detections, csv_path, origin)
+    
+        summary_path = output_dir / "summary.txt"
+        with summary_path.open("w", encoding="utf-8") as summary_file:
+            summary_file.write("Dye area analysis\n")
+            summary_file.write(f"Total pixels: {image.shape[0] * image.shape[1]}\n")
+            summary_file.write(f"Dye pixel count: {dye_area.pixel_area}\n")
+            summary_file.write(f"Dye area ratio: {dye_area.area_ratio:.4f}\n")
+            summary_file.write("\n")
+            summary_file.write("Crop bounds (x_min, y_min, x_max, y_max):\n")
+            summary_file.write(
+                f"{crop_bounds[0]}, {crop_bounds[1]}, {crop_bounds[2]}, {crop_bounds[3]}\n"
+            )
+            summary_file.write("\nVideo analysis:\n")
+            summary_file.write(f"Video file: {args.video.name}\n")
+            summary_file.write(f"Total frames processed: {total_frames}\n")
+            summary_file.write(f"Frame pairs analyzed: {frame_pairs}\n")
+            summary_file.write(f"Total vectors exported: {total_vectors}\n")
+            summary_file.write(
+                "Vectors stored per frame pair with columns [x, y, delta_x, delta_y, new_field].\n"
+            )
+            summary_file.write(f"CSV export: {flow_csv_path.name}\n")
+            summary_file.write(f"Cropped mask directory: {cropped_masks_dir.name}\n")
+            if flow_overlay_saved:
+                summary_file.write(f"First visualization: {flow_vis_path.name}\n")
+            else:
+                summary_file.write("No sparse flow visualization generated (no vectors detected).\n")
+            summary_file.write("\nNumeric detections:\n")
+            #if digit_detections:
+            #    for det in digit_detections:
+            #        x, y, w, h = det.bbox
+            #        summary_file.write(
+            #            f"text={det.text} confidence={det.confidence:.2f} bbox={(x + origin[0], y + origin[1], w, h)}\n"
+            #        )
+            #else:
+            #    summary_file.write("No numeric text detected.\n")
+    
+        print("Analysis complete.")
+        print(f"Video analyzed: {args.video}")
+        print(f"Cropped region saved to: {cropped_path}")
+        print(f"Cropped mask saved to: {cropped_mask_path}")
+        print(f"Per-frame cropped masks directory: {cropped_masks_dir}")
+        print(f"Dye mask saved to: {dye_mask_path}")
+        print(f"Dye overlay saved to: {overlay_path}")
+        print(f"Sparse flow CSV saved to: {flow_csv_path}")
         if flow_overlay_saved:
-            summary_file.write(f"First visualization: {flow_vis_path.name}\n")
+            print(f"Sparse flow visualization saved to: {flow_vis_path}")
         else:
-            summary_file.write("No sparse flow visualization generated (no vectors detected).\n")
-        summary_file.write("\nNumeric detections:\n")
-        #if digit_detections:
-        #    for det in digit_detections:
-        #        x, y, w, h = det.bbox
-        #        summary_file.write(
-        #            f"text={det.text} confidence={det.confidence:.2f} bbox={(x + origin[0], y + origin[1], w, h)}\n"
-        #        )
-        #else:
-        #    summary_file.write("No numeric text detected.\n")
-
-    print("Analysis complete.")
-    print(f"Video analyzed: {args.video}")
-    print(f"Cropped region saved to: {cropped_path}")
-    print(f"Cropped mask saved to: {cropped_mask_path}")
-    print(f"Per-frame cropped masks directory: {cropped_masks_dir}")
-    print(f"Dye mask saved to: {dye_mask_path}")
-    print(f"Dye overlay saved to: {overlay_path}")
-    print(f"Sparse flow CSV saved to: {flow_csv_path}")
-    if flow_overlay_saved:
-        print(f"Sparse flow visualization saved to: {flow_vis_path}")
-    else:
-        print("No sparse flow visualization generated (no vectors detected).")
-    #print(f"Digits region saved to: {digits_region_path}")
-    #print(f"Processed digits preview saved to: {processed_digits_path}")
-    #print(f"Numeric readings CSV saved to: {csv_path}")
-    print(f"Summary saved to: {summary_path}")
+            print("No sparse flow visualization generated (no vectors detected).")
+        #print(f"Digits region saved to: {digits_region_path}")
+        #print(f"Processed digits preview saved to: {processed_digits_path}")
+        #print(f"Numeric readings CSV saved to: {csv_path}")
+        print(f"Summary saved to: {summary_path}")
+    except KeyboardInterrupt:
+        with digits_csv_path.open("w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(
+                csvfile,
+                fieldnames=["frame_index", "digits", "velocity", "reynolds_number"],
+            )
+            writer.writeheader()
+            for row in digits_rows:
+                writer.writerow(
+                    {
+                        "frame_index": row["frame_index"],
+                        "digits": row["digits"],
+                        "velocity": format_optional_float(row["velocity"]),
+                        "reynolds_number": format_optional_float(row["reynolds_number"]),
+                    }
+                )
 
 
+    
+    
 if __name__ == "__main__":
     main()
