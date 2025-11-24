@@ -23,9 +23,9 @@ import pytesseract
 
 # Marker detection
 MARKER_MIN_AREA = 80  # Smallest contour area (in pixels) considered a valid red marker.
-RED_HSV_RANGE_1 = (np.array([0, 100, 80], dtype=np.uint8), np.array([10, 255, 255], dtype=np.uint8))
+RED_HSV_RANGE_1 = (np.array([0, 100, 100], dtype=np.uint8), np.array([10, 255, 255], dtype=np.uint8))
 # HSV lower/upper bounds capturing the lower portion of the red spectrum.
-RED_HSV_RANGE_2 = (np.array([160, 100, 80], dtype=np.uint8), np.array([179, 255, 255], dtype=np.uint8))
+RED_HSV_RANGE_2 = (np.array([160, 100, 100], dtype=np.uint8), np.array([179, 255, 255], dtype=np.uint8))
 # HSV lower/upper bounds capturing the upper portion of the red spectrum.
 MARKER_KERNEL_SIZE = (5, 5)  # Elliptical kernel size for cleaning the red marker mask.
 MARKER_OPEN_ITERATIONS = 2  # Number of opening operations to remove small noise in marker mask.
@@ -176,10 +176,10 @@ def crop_between_markers(
         raise RuntimeError("Could not determine region enclosed by red markers.")
 
     x, y, w, h = cv2.boundingRect(nonzero)
-    x_min = max(x - padding -50, 0)
-    y_min = max(y - padding + 115, 0)
+    x_min = max(x - padding -150, 0)
+    y_min = max(y - padding -20, 0)
     x_max = min(x + w + padding + 50, image.shape[1])
-    y_max = min(y + h + padding - 145, image.shape[0])
+    y_max = min(y + h + padding - 100, image.shape[0])
 
     if source is None:
         source = image
@@ -319,9 +319,11 @@ def prepare_digits_region(
     height_ratio: float = DEFAULT_DIGITS_HEIGHT_RATIO,
 ) -> Tuple[np.ndarray, Tuple[int, int]]:
     h, w = image.shape[:2]
-    x_start = max(int(w * (1.0 - width_ratio)), 0)
-    y_start = max(int(h * (1.0 - height_ratio)), 0)
-    return image[y_start:, x_start:], (x_start, y_start)
+    x_min = max(w-198, 0)
+    y_min = max(h-37, 0)
+    x_max = min(w-137, w)
+    y_max = min(h-20, h)
+    return image[y_min:y_max, x_min:x_max],[0,0]
 
 
 def preprocess_digits_region(
@@ -332,7 +334,7 @@ def preprocess_digits_region(
     clahe = cv2.createCLAHE(clipLimit=DIGIT_CLAHE_CLIP_LIMIT, tileGridSize=DIGIT_CLAHE_TILE_GRID_SIZE)
     enhanced = clahe.apply(gray)
 
-    scaled = cv2.resize(
+    cleaned = cv2.resize(
         enhanced,
         dsize=None,
         fx=scale_factor,
@@ -340,10 +342,10 @@ def preprocess_digits_region(
         interpolation=cv2.INTER_CUBIC,
     )
 
-    thresh = cv2.adaptiveThreshold(scaled, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)#cv2.threshold(scaled, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, DIGIT_THRESH_KERNEL_SIZE)
-    cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
-    cleaned = cv2.medianBlur(cleaned, DIGIT_MEDIAN_BLUR_SIZE)
+    # thresh = cv2.adaptiveThreshold(scaled, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)#cv2.threshold(scaled, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # kernel = cv2.getStructuringElement(cv2.MORPH_RECT, DIGIT_THRESH_KERNEL_SIZE)
+    # cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
+    # cleaned = cv2.medianBlur(cleaned, DIGIT_MEDIAN_BLUR_SIZE)
 
     scale_x = cleaned.shape[1] / max(region.shape[1], 1)
     scale_y = cleaned.shape[0] / max(region.shape[0], 1)
@@ -355,7 +357,7 @@ def preprocess_digits_region(
         DIGIT_BORDER_PADDING,
         DIGIT_BORDER_PADDING,
         borderType=cv2.BORDER_CONSTANT,
-        value=255,
+        value=0,
     )
 
     return padded, scale_x, scale_y, DIGIT_BORDER_PADDING
@@ -526,15 +528,15 @@ def main() -> None:
     cropped_mask_path = output_dir / "cropped_region_mask.png"
     cv2.imwrite(str(cropped_mask_path), cropped_mask)
     
-    #digits_region, origin = prepare_digits_region(image, width_ratio=args.digits_width, height_ratio=args.digits_height)
-    #digits_region_path = output_dir / "digits_region.png"
-    #cv2.imwrite(str(digits_region_path), digits_region)
+    # digits_region, origin = prepare_digits_region(image, width_ratio=args.digits_width, height_ratio=args.digits_height)
+    # digits_region_path = output_dir / "digits_region.png"
+    # cv2.imwrite(str(digits_region_path), digits_region)
 
-    #digit_detections, processed_digits = run_ocr_on_region(digits_region)
-    #processed_digits_path = output_dir / "digits_region_processed.png"
-    #cv2.imwrite(str(processed_digits_path), processed_digits)
-    #csv_path = output_dir / "numeric_readings.csv"
-    #save_digits_to_csv(digit_detections, csv_path, origin)
+    # digit_detections, processed_digits = run_ocr_on_region(digits_region)
+    # processed_digits_path = output_dir / "digits_region_processed.png"
+    # cv2.imwrite(str(processed_digits_path), processed_digits)
+    # csv_path = output_dir / "numeric_readings.csv"
+    # save_digits_to_csv(digit_detections, csv_path, origin)
 
     frame_index = 0
     first_mask_path = cropped_masks_dir / f"frame{frame_index:04d}_mask.png"
@@ -553,22 +555,25 @@ def main() -> None:
             break
         total_frames += 1
         frame_index += 1
-        #current_crop = crop_with_bounds(frame, crop_bounds)
-        #frame_dye_mask = compute_dye_area(frame).mask
-        #current_cropped_mask = crop_with_bounds(frame_dye_mask, crop_bounds)
-        #mask_path = cropped_masks_dir / f"frame{frame_index:04d}_mask.png"
-        #cv2.imwrite(str(mask_path), current_cropped_mask)
-        #flow_result = compute_sparse_vector_field(previous_crop, current_crop)
-        #flow_vectors_sequence.append(flow_result.vectors)
-        #frame_pairs += 1
-        #total_vectors += flow_result.vectors.shape[0]
-        #if flow_result.vectors.size and not flow_overlay_saved:
-        #    flow_overlay = draw_sparse_flow(previous_crop, flow_result)
-        #    cv2.imwrite(str(flow_vis_path), flow_overlay)
-        #    flow_overlay_saved = True
-        #previous_crop = current_crop
+        current_crop = crop_with_bounds(frame, crop_bounds)
+        frame_dye_mask = compute_dye_area(frame).mask
+        current_cropped_mask = crop_with_bounds(frame_dye_mask, crop_bounds)
+        mask_path = cropped_masks_dir / f"frame{frame_index:04d}_mask.png"
+        cv2.imwrite(str(mask_path), current_cropped_mask)
+        flow_result = compute_sparse_vector_field(previous_crop, current_crop)
+        flow_vectors_sequence.append(flow_result.vectors)
+        frame_pairs += 1
+        total_vectors += flow_result.vectors.shape[0]
+        if flow_result.vectors.size and not flow_overlay_saved:
+           flow_overlay = draw_sparse_flow(previous_crop, flow_result)
+           cv2.imwrite(str(flow_vis_path), flow_overlay)
+           flow_overlay_saved = True
+        previous_crop = current_crop
+
 
     cap.release()
+
+
 
     flow_csv_path = output_dir / "sparse_flow_vectors.csv"
     save_sparse_flow_sequence_to_csv(flow_vectors_sequence, flow_csv_path)
