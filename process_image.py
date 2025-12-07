@@ -644,34 +644,35 @@ def main() -> None:
             total_frames += 1
             frame_index += 1
             #current_crop = crop_with_bounds(frame, crop_bounds)
-            frame_dye_mask = compute_dye_area(frame).mask
-            current_cropped_mask = crop_with_bounds(frame_dye_mask, crop_bounds)
+            #frame_dye_mask = compute_dye_area(frame).mask
+            cropped_color, crop_bounds = crop_between_markers(image, markers, padding=args.padding)
+            #current_cropped_mask = crop_with_bounds(cropped_color, crop_bounds)
             mask_path = cropped_masks_dir / f"frame{frame_index:04d}_mask.png"
-            cv2.imwrite(str(mask_path), current_cropped_mask)
-            digits_region, _ = prepare_digits_region(
-                frame, width_ratio=args.digits_width, height_ratio=args.digits_height
-            )
-            digit_detections, processed_digits = run_ocr_on_region(digits_region)
-            #digits_path = digits_dir / f"frame{frame_index:04d}_digits.png"
-            processed_digits_path = processed_digits_dir / f"frame{frame_index:04d}_digits_processed.png"
-            #cv2.imwrite(str(digits_path), digits_region)
-            cv2.imwrite(str(processed_digits_path), processed_digits)
-            digits_text = join_digit_detections(digit_detections)
-            velocity = parse_velocity_from_digits(digits_text, args.velocity_scale)
-            reynolds_number = compute_reynolds_number(
-                velocity, args.characteristic_length, args.kinematic_viscosity
-            )
-            digits_rows.append(
-                {
-                    "frame_index": frame_index,
-                    "digits": digits_text,
-                    "velocity": velocity,
-                    "reynolds_number": reynolds_number,
-                }
-            )
+            cv2.imwrite(str(mask_path), cropped_color)
+            #digits_region, _ = prepare_digits_region(
+            #    frame, width_ratio=args.digits_width, height_ratio=args.digits_height
+           # )
+            # digit_detections, processed_digits = run_ocr_on_region(digits_region)
+            # digits_path = digits_dir / f"frame{frame_index:04d}_digits.png"
+            # processed_digits_path = processed_digits_dir / f"frame{frame_index:04d}_digits_processed.png"
+            # cv2.imwrite(str(digits_path), digits_region)
+            # cv2.imwrite(str(processed_digits_path), processed_digits)
+            # digits_text = join_digit_detections(digit_detections)
+            # velocity = parse_velocity_from_digits(digits_text, args.velocity_scale)
+            # reynolds_number = compute_reynolds_number(
+            #     velocity, args.characteristic_length, args.kinematic_viscosity
+            # )
+            # digits_rows.append(
+            #     {
+            #         "frame_index": frame_index,
+            #         "digits": digits_text,
+            #         "velocity": velocity,
+            #         "reynolds_number": reynolds_number,
+            #     }
+            # )
             #flow_result = compute_sparse_vector_field(previous_crop, current_crop)
             #flow_vectors_sequence.append(flow_result.vectors)
-            frame_pairs += 1
+            #frame_pairs += 1
             #total_vectors += flow_result.vectors.shape[0]
             #if flow_result.vectors.size and not flow_overlay_saved:
             #   flow_overlay = draw_sparse_flow(previous_crop, flow_result)
